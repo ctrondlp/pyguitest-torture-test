@@ -1,0 +1,20 @@
+# Virtualenvs
+.venv/
+venv/
+
+# Python build and cache artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Screenshots and recordings a driver or the recorder leaves behind
+*.png
+*.ppm
+/recordings/
