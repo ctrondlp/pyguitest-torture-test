@@ -1,5 +1,9 @@
 # TortureTest
 
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
+[![Platforms driven clean](https://img.shields.io/badge/platforms%20driven%20clean-5-brightgreen.svg)](VALIDATION.md)
+
 A desktop application stuffed with (nearly) every Qt control, built to be the
 worst case for [pyguitest](https://github.com/ctrondlp/pyguitest) — and for any
 other accessibility-driven GUI automation tool.
@@ -24,12 +28,12 @@ themes, resizes and platform changes.
 | Menu-bar and toolbar actions | **95** |
 | Tab pages | **9** |
 | Uniquely-named controls driven and verified | **105** |
-| Platforms driven clean, zero failures | **5** |
+| Platforms driven clean, zero failures | **6** |
 
 The last two rows are the ones that matter: every one of the 105 named
 controls is individually driven *and* confirmed landed by reading the status
 bar — plus the whole menu bar — on FreeBSD/GhostBSD, Pop!_OS/COSMIC, Debian,
-Windows and macOS. See [VALIDATION.md](VALIDATION.md) for the per-platform
+Omarchy/Hyprland, Windows and macOS. See [VALIDATION.md](VALIDATION.md) for the per-platform
 record, including the bugs each run found in pyguitest itself.
 
 ## Requirements
@@ -123,6 +127,11 @@ drivers/          one validation driver per platform
 examples/         a pyguitest-recorder output, kept verbatim
 ```
 
+[AGENTS.md](AGENTS.md) carries the driver contract and the platform traps,
+[VALIDATION.md](VALIDATION.md) the per-platform record, and
+[examples/README.md](examples/README.md) explains why the recorded example
+still matches a tab name the app no longer publishes.
+
 ## Self-test
 
 `tests/test_app.py` instantiates the whole window headlessly (Qt's offscreen
@@ -182,3 +191,13 @@ Everything a driver does goes through pyguitest's own input and tree API.
 Nothing in this repo uses XTEST, XRecord, Xlib, uinput, Quartz, AppKit or UIA
 directly — the point is to exercise pyguitest, so reaching past it would
 defeat the exercise. See [AGENTS.md](AGENTS.md) for the full contract.
+
+## Contributing
+
+A new control touches more files than it looks like it should, and a new
+modal dialog has to be registered in every driver or it strands a whole run.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+GPL-2.0-or-later, the same as pyguitest. See [LICENSE](LICENSE).

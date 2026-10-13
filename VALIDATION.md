@@ -4,7 +4,7 @@ Tracks the cross-platform validation effort: driving this app through
 pyguitest's own API (never raw XTEST/XRECORD — see AGENTS.md) on all 5
 target platforms, one at a time, fixing real bugs as they're found. Prior
 history before 2026-10-11 lived in a private, non-repo file
-(`~/pyguitest-validation-state.md`); from this session on it lives here.
+(`~/pyguitest-validation-state.md`); from 2026-10-11 on it lives here.
 
 ## Scale of the fixture
 
@@ -310,15 +310,81 @@ path and the runs above neither exercised nor validated it. It is covered by
 the self-test (`test_language_switch_rebuilds` plus the new error-message
 test, 23/23 locally).
 
+## Omarchy / Hyprland: the first wlroots compositor (2026-10-13)
+
+Hyprland and niri were both on record as never having met a live compositor.
+This closes that: a full `all controls verified` run on Omarchy (Arch),
+Hyprland on Wayland, with **pyguitest needing no changes whatsoever**.
+`connect()` composed
+`hyprland+atspi+input:wtype+capture:grim+clipboard:wl-copy+imagesearch:compare`
+on its own, every window capability -- list, state, activate, minimize,
+geometry, placement, resize, **pid**, at-point -- served by `hyprland`.
+`pyguitest` with no subcommand already printed `compositor wlroots
+(Hyprland)` and listed `hyprctl`; `hints.py` already knew Arch's package
+names. Nothing in the library had to be taught about this platform.
+
+`drivers/cosmic.py` runs here **unmodified**, which is why there is no
+`drivers/hyprland.py`. COSMIC matches windows by title because its protocol
+carries no pid; Hyprland does carry one, so title matching is merely less
+precise, not wrong. One driver covering both wlroots-family compositors is
+the point.
+
+**Pointer injection is a permission here, not a protocol.** `/dev/uinput`
+exists but is root-owned and the login account is not in the `input` group, so
+`POINTER_MOVE`/`POINTER_BUTTON` are absent and the pointer-free strategy
+applies. Unlike COSMIC and Debian -- where no permission change can help --
+`sudo usermod -aG input <user>` plus a re-login would unlock the full
+pointer-driven strategy. pyguitest diagnoses this unprompted, in those
+words.
+
+### Resolution turned out to be load-bearing
+
+The VBox adapter's `preferred` mode is 1024x768, and Omarchy sets
+`scale = "auto"` with `GDK_SCALE=2`. At that size most of the fixture fell
+outside the window: the driver reached **7** actable controls on the first
+tab against **17** at 1920x1080. A run at the default would have reported
+"all controls verified" having checked a fraction of them -- the exact
+shape of a misleading pass, so the first run was discarded rather than
+recorded. `scale = 1` matters separately: pyguitest skips its rectangle
+checks on a scaled screen, because AT-SPI extents and window geometry stop
+sharing units.
+
+`hyprctl keyword` cannot set this. Omarchy uses Hyprland's new **Lua**
+config, which is what "keyword can't work with non-legacy parsers" means.
+The mode goes in `~/.config/hypr/monitors.lua` as
+`hl.monitor({ output = "VGA-1", mode = "1920x1080@60", position = "0x0",
+scale = 1 })`, then `hyprctl reload`.
+
+### The two driver fixes
+
+1. **`Rich Text` was never driven at all.** A `QTextEdit` publishing only a
+   `Set Focus` action, and not reachable by Tab -- 70 presses never focused
+   it -- so `seek_focus` failed and the branch did nothing. The first
+   instinct was `do_action("Set Focus")`, but that reaches past the library:
+   measured on the box, pyguitest's own `Element.focus()` sets focus just as
+   well (`focused=True` for both `Rich Text` and `Notes`). So the fallback
+   uses the primitive, and *verifies* focus before typing -- because on
+   COSMIC and the local GNOME desktop `focus()` was measured **not** to move
+   real keyboard focus, which is why `seek_focus` exists and still runs
+   first. That platform difference is worth remembering.
+2. **`Tool Box` could not have reported however it was clicked.** The
+   `QToolBox` container publishes no actions, and the application reports
+   `currentChanged` for one -- so a click on the container switches no page
+   and fires nothing, pointer or not. Its section headers are real push
+   buttons (`Section One/Two/Three`, each offering `Press`), and pressing one
+   is what a *user* does to switch pages. The driver clicks the **last**
+   header, because the first is already the open page.
+
 ## Platform matrix
 
 | Platform | Status | Notes |
 |---|---|---|
 | Linux (Wayland, this maintainer's desktop) | **Partially unblocked, 4 bugs fixed, not re-verified** (2026-10-12) — pointer is broken but keyboard works (same split as COSMIC/Debian); a pointer-free driver + 3 interact() fixes exist but the fixed version has not been re-run here, per explicit instruction to stop testing this box — see below | Live desktop — do not run without explicit go-ahead each time |
-| GhostBSD/FreeBSD (X11) | **Fully clean — zero known bugs** (2026-10-12) — every tab and the entire menu bar walked with `all controls verified`, no failures at all, confirmed on 2 consecutive runs after a 10-run/12-failures-every-time baseline; reconfirmed clean again after this session's pyguitest hang-hardening fix was synced over | Dedicated test box |
+| GhostBSD/FreeBSD (X11) | **Fully clean — zero known bugs** (2026-10-12) — every tab and the entire menu bar walked with `all controls verified`, no failures at all, confirmed on 2 consecutive runs after a 10-run/12-failures-every-time baseline; reconfirmed clean again after the pyguitest hang-hardening fix was synced over | Dedicated test box |
 | Pop!_OS 24.04 / COSMIC | **Fully clean — zero known bugs** (2026-10-12) — pointer-free driver (AT-SPI action clicks + Tab-seek real-focus keyboard), `all controls verified` on 2 consecutive full runs | Dedicated test box; slow (repeated bounded AT-SPI stalls during menu walking) but correct |
 | Debian 13 (Wayland) | **Fully clean — zero known bugs** (2026-10-12) — pointer-free driver (same strategy as COSMIC), `all controls verified` on 2 consecutive full runs after fixing 3 real bugs — see below | Dedicated test box |
 | macOS | **Fully clean — zero known bugs** (re-verified 2026-10-13 twice: after the restructure, and again after `QUndoView`/`QErrorMessage` were added — 21/21 self-test, `all controls verified`, exit 0 each time) — `all controls verified`; 7 real bugs fixed along the way, incl. the driver clicking the Dock's Notes icon (which stole keyboard focus and made whole runs look like hangs) and 2 genuine pyguitest bugs — see below | Dedicated test box (VM); Quick Note hot corner had to be disabled |
+| Omarchy / Hyprland (Arch) | **Fully clean — zero known bugs** (2026-10-13) — the first **wlroots** compositor this project has reached; `all controls verified` after two driver fixes, with pyguitest itself needing no changes at all | Dedicated test box (VBox); pointer injection is a *permission* away, not a protocol limit — see below |
 | Windows | **Fully clean — zero known bugs** (re-verified 2026-10-13 after the restructure, then again after `QUndoView`/`QErrorMessage` — 21/21 self-test, `all controls verified`, `EXIT=0`, empty stderr, nothing leaked; the intermediate failure and its cause are below) — brand-new driver, `all controls verified` on 2 consecutive full runs on the first attempt | Dedicated test box; must run via a Scheduled Task bound to the interactive session, not plain SSH — see below |
 
 ## 2026-10-11 session
@@ -339,7 +405,7 @@ BSD's checkouts of `pyguitest` and `pyguitest-recorder` were stale (behind
 by several merged PRs, including the COSMIC backend and an already-merged
 `click_via` feature) and also had their own *separate*, independently
 uncommitted `click_via`-shaped WIP sitting in the working tree — apparently
-written directly on the box in an earlier session, in violation of the
+written directly on the box at some earlier point, in violation of the
 project's own "never write into a test box's checkout" rule. That WIP
 turned out to be superseded by what already landed on `main` (same feature,
 independently implemented), so no work was lost; the stale/uncommitted
@@ -388,8 +454,8 @@ event delivery broken desktop-wide), not a pyguitest, torture-test, or
 driver-script bug. It reproduces identically for a brand-new, never-
 automated Terminal window, ruling out anything specific to Qt, AT-SPI, or
 this app. Likely needs the X session restarted (or the box rebooted) to
-clear, which this session did not do unilaterally since it affects the
-user's live session on that box.
+clear, which was not done unilaterally here since it would disrupt the
+live desktop session on that box.
 
 All test processes and diagnostic scripts from this investigation were
 cleaned up (confirmed via `ps`/`wmctrl`); nothing was left running or
@@ -402,8 +468,8 @@ resume from the known-good "run 5" state described in the pre-2026-10-11
 history below — tabs+menus walk end-to-end; the one still-open item is the
 9-menu-dialog detection gap (see below).
 
-**Update, later the same session**: input recovered on its own (or was
-fixed by the user outside this session — never diagnosed further, since
+**Update, later the same day**: input recovered on its own (or was fixed
+on the box from outside this effort — never diagnosed further, since
 the blocker cleared and `xdotool type`/`click` against a throwaway Terminal
 window were confirmed working again). Validation resumed from there; see
 the next section for what followed.
@@ -466,7 +532,7 @@ including a caught `BackendCallTimeout`.
 A full run still didn't finish even with a 600s budget — not a hang
 (`BackendCallTimeout` was confirmed not firing), just genuinely slow AT-SPI.
 Checked the actual AT-SPI session bus process and found the real cause:
-the user session's AT-SPI `dbus-daemon` had accumulated **7 minutes 44
+the login session's AT-SPI `dbus-daemon` had accumulated **7 minutes 44
 seconds of CPU time** over the ~5.5-hour test session (compare: its sibling
 `at-spi2-registryd`, sitting at a normal 4 seconds). That daemon routes
 every single AT-SPI message; something about it degrades under sustained
@@ -475,9 +541,9 @@ documented ~5s baseline up to 10-20s+.
 
 **Fix**: killed the three AT-SPI processes belonging to the logged-in
 user's session
-(`at-spi-bus-launcher`, its `dbus-daemon`, `at-spi2-registryd`) — confirmed
-with the user first, since it's a live desktop session even on a dedicated
-test box. They respawn automatically via AT-SPI's own on-demand activation
+(`at-spi-bus-launcher`, its `dbus-daemon`, `at-spi2-registryd`) — cleared
+with the maintainer first, since it's a live desktop session even on a
+dedicated test box. They respawn automatically via AT-SPI's own on-demand activation
 the moment a client reconnects (confirmed: `a11y_bus_reachable()` → `True`,
 a real `connect()` + tree walk succeeded immediately after). A direct
 timing probe right after confirmed `find_elements()` back down to 4.37s —
@@ -564,11 +630,11 @@ what happened to those 12 failures.
 
 ### MILESTONE: all 12 known BSD failures fixed — zero known bugs (2026-10-12)
 
-User, after the 10x campaign: **"Why are we not fixing the failures"** —
-fair challenge; the two gaps behind all 12 failures had been investigated
-hard in an earlier session and explicitly deprioritized at the time, and
-tonight's focus had been on reaching a complete run at all (never done
-before) plus proving stability, not on these two specific items. Revisited
+A fair challenge raised after the 10x campaign: *why are the failures not
+being fixed?* The two gaps behind all 12 failures had been investigated
+hard earlier and explicitly deprioritized at the time, and the focus up to
+that point had been on reaching a complete run at all (never done before)
+plus proving stability, not on these two specific items. Revisited
 both properly and found real, fixable root causes for all of them — four
 small, targeted fixes, two in this app and two in the BSD driver:
 
@@ -704,7 +770,7 @@ this box, confirmed via direct probing, not an app or driver bug:
   absolute axes, nothing else, built directly with no code from this
   project at all — clicked the identical target and had the identical zero
   effect. This rules out anything about pyguitest's own device declaration;
-  *no* uinput-created device can deliver input to this session right now,
+  *no* uinput-created device can deliver input to this login session right now,
   regardless of its capabilities.
 - AT-SPI's own accessible-action route (`element.click()`, which never
   touches `uinput` — it calls GNOME's AT-SPI action interface directly)
@@ -718,12 +784,12 @@ this box, confirmed via direct probing, not an app or driver bug:
 **Conclusion**: a real, thoroughly-isolated, system-level block on this
 specific Debian VM's ability to accept any uinput-injected input at all,
 most likely a libinput/seat configuration issue below what's diagnosable
-without root (`sudo` on this box prompts for a password this session does
-not have; `libinput-tools`, which would give a direct, authoritative answer
+without root (`sudo` on this box prompts for a password the automated run
+does not have; `libinput-tools`, which would give a direct, authoritative answer
 via `libinput debug-events`, is not installed and could not be installed
 without one). Not a pyguitest bug, not a driver bug, not an app bug (the
 one real app bug found along the way — the status-bar accessibility gap —
-is fixed and confirmed independently on BSD). Needs the user's own access
+is fixed and confirmed independently on BSD). Needs the maintainer's own access
 to this box to resolve (check `libinput debug-events` once installed, or
 compare against a known-working Debian/GNOME/Wayland box's `libinput`
 device list for what's different). The `KEY_POWER` fix and the status-bar
@@ -737,23 +803,23 @@ fixes as Debian and BSD), a working venv set up (`~/code/.venv`, system
 Python 3.15's own `gi`/AT-SPI bindings via `--system-site-packages`, plus a
 pip-installed PySide6 wheel — the same box's dedicated venvs were each
 missing one half of the pair), and a real `NO_AT_BRIDGE=1` gotcha fixed
-(`app_environment()` now explicitly unsets it — this shell, Claude Code's
-own, sets it, which would have silently kept the Qt app off the
-accessibility bus entirely). The live run itself hit the exact same
-symptom as Debian: every control's status stayed on "Ready", pointer
+(`app_environment()` now explicitly unsets it — the shell this work ran in
+sets it, which would have silently kept the Qt app off the accessibility
+bus entirely). The live run itself hit the exact same symptom as Debian:
+every control's status stayed on "Ready", pointer
 clicks landing nowhere, confirmed via the same isolated probe (window
 correctly focused and active, `element.click()` via the accessible-action
 route works perfectly, raw pointer clicks have zero effect). The
 `pyguitest` uinput device is correctly `seat`-tagged and listed in
 `loginctl seat-status` here too (confirmed with the same several-seconds
-settle this session's Debian investigation needed to rule out a timing
-race). Same conclusion: a real, system-level libinput/Mutter block on
+settle the Debian investigation needed to rule out a timing race). Same conclusion: a real, system-level libinput/Mutter block on
 synthetic input from uinput-created devices, not diagnosable further
-without root. Offered the user a one-off sudo grant for `libinput
-debug-events`; blocked by the permission system itself (piping a password
-into `sudo`, even with explicit user authorization given in response to
-being asked). User's call: leave this box blocked for now, same as Debian,
-and move on to other platforms.
+without root. A one-off sudo grant for `libinput debug-events` was
+offered and turned out to be unusable: piping a password into `sudo` is
+blocked by the tooling's own permission system even with explicit
+authorization given in response to being asked. Maintainer's call: leave
+this box blocked for now, same as Debian, and move on to other
+platforms.
 
 **Superseded the same day**, after COSMIC's pointer-free driver proved the
 "blocked" conclusion was only half right (see below): re-tested this box's
@@ -765,8 +831,8 @@ since this box's `gnomeshell` backend populates `Window.pid` correctly,
 unlike COSMIC's) and found 4 real bugs, all later confirmed and fixed via
 Debian (see "Debian 13" below for the full root-cause writeup — identical
 symptoms, identical fixes). The fixed driver has **not been re-run on this
-box**: the user said to stop testing it partway through the live
-investigation, so the fix is ported into `drivers/linux.py` but
+box**: testing here was called off partway through the live investigation,
+so the fix is ported into `drivers/linux.py` but
 unverified here. This box's status is "probably fixed, confirm before
 relying on it" — not "fully clean" until a clean run is actually observed.
 
@@ -820,7 +886,7 @@ written:
 `doActionNamed` call was not bounded the way every other AT-SPI round trip
 in `atspi.py` already was (`find_elements`/`extents`/`Element.pid`/etc., all
 wrapped in `_run_bounded` since the BSD `BackendCallTimeout` work earlier
-this session). Confirmed live here: a `doActionNamed` call genuinely hung
+in this effort). Confirmed live here: a `doActionNamed` call genuinely hung
 mid-run, surviving even a plain `timeout`-sent `SIGTERM` (the call is stuck
 in a native GI/D-Bus call that never hands control back to the interpreter —
 the same root cause class `_run_bounded`'s own docstring already describes —
@@ -836,7 +902,7 @@ previously-unwrapped `_frame_pid()` helper (which duplicates `Element.pid`'s
 own already-bounded read, without the bound). All 135 `test_atspi.py` tests
 and the full 2260-test/35058-subtest suite pass after the audit. Parked,
 uncommitted, on `P2-atspi-call-timeout` alongside the earlier BSD fixes —
-the user reviews and commits once every platform is done.
+the maintainer reviews and commits once every platform is done.
 
 **A real, repeated AT-SPI stall found but not yet root-caused**: once a
 `QMenu` is open, `gui.find_elements(role=MENU_ROLES, ...)` genuinely hangs
@@ -874,7 +940,7 @@ that led to "BLOCKED" (raw kernel events, udev seat tagging, screen
 calibration, a bare-minimum `evdev` device all checking out — see above)
 never actually isolated *keyboard* injection from *pointer* injection; it
 tested pointer clicks failing and reasonably generalized to "no synthetic
-input," which this session's COSMIC work showed was the wrong
+input," which the COSMIC work showed was the wrong
 generalization for a libinput/Mutter block of this specific shape.
 
 New driver written, `drivers/debian.py` (pid-based
@@ -939,7 +1005,7 @@ can be retired.
 A brand-new driver, `drivers/windows.py`, written from scratch —
 the old `drivers/windows.py` on the box was coupled to pyguitest-
 recorder (capture + script generation, not a plain drive-and-verify
-contract) and pre-dated most of this session's fixes (its last real
+contract) and pre-dated most of the fixes above (its last real
 result: 1-9/104 "resemblance", against a stale 104-control app checkout).
 App source was stale there too (660-line `app.py` vs the current
 729-line one) — synced current, same as every other platform.

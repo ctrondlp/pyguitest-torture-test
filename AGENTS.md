@@ -108,6 +108,7 @@ built around that rather than fighting it.
 | Local Wayland/GNOME desktop | `atspi` tree, `uinput` keyboard | **pointer-free**, same strategy as COSMIC |
 | Windows 11 | `uia` + `win32` | pointer + keyboard, both work |
 | macOS | `macos` tree + `macquartz` input | pointer + keyboard, both work |
+| Omarchy / Hyprland (Arch) | `hyprland` windows, `atspi` tree, `wtype` keyboard, `grim` capture | **pointer-free**, but for a different and *fixable* reason — see below |
 
 On COSMIC, Debian and the local GNOME/Wayland desktop, `uinput` pointer
 events are accepted by the kernel
@@ -116,6 +117,57 @@ the same backend works fine. That split is why those three drivers never
 move the pointer at all: they click through `Element.click()` (the
 accessible action) and reach keyboard-only controls by Tab-seeking until
 `Element.focused` is true on the one they want.
+
+## Omarchy / Hyprland, the newest target
+
+The first wlroots compositor this project has reached — Hyprland and niri
+were previously on record as never having met a live one. Several things
+about it are worth knowing before touching it.
+
+**pyguitest needed no changes for it.** `connect()` composes
+`hyprland+atspi+input:wtype+capture:grim+clipboard:wl-copy+imagesearch:compare`
+on its own, with every window capability (list, state, activate, minimize,
+geometry, placement, resize, **pid**, at-point) served by `hyprland`.
+`pyguitest` with no subcommand already prints `compositor wlroots
+(Hyprland)` and lists `hyprctl` among its tools, and `hints.py` already knew
+Arch's package names. Nothing had to be added.
+
+**`drivers/cosmic.py` runs here unmodified**, which is why there is no
+`drivers/hyprland.py`. The COSMIC driver matches windows by title because
+COSMIC's protocol carries no pid; Hyprland does carry one, so title matching
+is merely less precise there, not wrong. One driver covering both
+wlroots-family compositors is the point — do not fork it without a reason
+the code can state.
+
+**Its pointer limitation is a permission, not a protocol.** `/dev/uinput`
+exists but is `root`-owned and the login account is not in the `input`
+group, so `POINTER_MOVE`/`POINTER_BUTTON` are absent and the pointer-free
+strategy applies. Unlike COSMIC and Debian, this is fixable: `sudo usermod -aG input
+<user>` and a re-login turns on the full pointer-driven strategy. `pyguitest`
+diagnoses it unprompted, in those words. Omarchy has no passwordless sudo,
+so this is the maintainer's call.
+
+**Two traps that cost real time here:**
+
+- **Resolution is load-bearing, not cosmetic.** The VBox adapter's
+  `preferred` mode is 1024x768, and Omarchy sets `scale = "auto"` with
+  `GDK_SCALE=2`. At that size most of the fixture falls outside the window
+  and the driver can only reach **7** actable controls on the first tab
+  against 17 at 1920x1080 — a run that would "pass" having checked a
+  fraction. `scale = 1` matters independently: pyguitest skips its rectangle
+  checks on a scaled screen, because AT-SPI extents and window geometry stop
+  sharing units.
+- **`hyprctl keyword` does not work.** Omarchy uses Hyprland's new **Lua**
+  config, which is what "keyword can't work with non-legacy parsers" means.
+  Set the mode in `~/.config/hypr/monitors.lua`
+  (`hl.monitor({ output = "VGA-1", mode = "1920x1080@60", position = "0x0",
+  scale = 1 })`) and `hyprctl reload`.
+
+**`Element.focus()` actually works here**, unlike on COSMIC and the local
+GNOME desktop where it was measured not to move real keyboard focus. That is
+why the `entry`/`text` branch tries `seek_focus` first and only then falls
+back to the library primitive — the fallback is for controls Tab cannot
+reach, such as a `QTextEdit` that publishes only `Set Focus`.
 
 ## Gotchas that cost real time
 

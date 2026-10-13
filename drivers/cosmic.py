@@ -214,6 +214,27 @@ def _is_showing(el):
         return False
 
 
+def _focus_via_api(el):
+    """Give `el` real keyboard focus through pyguitest, or return False.
+
+    `Element.focus()` is the library's own primitive for this. Checked
+    against the published "Set Focus" action on Hyprland and found to do the
+    same thing, so there is no reason to reach past it. The focus is verified
+    rather than assumed: on the desktops this driver family was built for,
+    `focus()` was measured not to move *real* keyboard focus, which is why
+    `seek_focus` exists and is still tried first.
+    """
+    try:
+        el.focus()
+    except Exception:
+        return False
+    time.sleep(0.2)
+    try:
+        return bool(el.focused)
+    except Exception:
+        return False
+
+
 def _status_text(status_bar_el):
     if status_bar_el is None:
         return ""
@@ -281,14 +302,33 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
     """Drive each control via AT-SPI action clicks + real-focus keyboard
     input, verify via the status bar, then walk every main tab page.
     """
-    status_bar_el = None
-    try:
-        for el in gui.find_elements(role="status bar", within=app_frame):
-            if getattr(el, "pid", None) == app_pid:
-                status_bar_el = el
-                break
-    except Exception:
-        pass
+    def _resolve_status_bar():
+        try:
+            for el in gui.find_elements(role="status bar", within=app_frame):
+                if getattr(el, "pid", None) == app_pid:
+                    return el
+        except Exception:
+            pass
+        return None
+
+    # Re-resolved on an empty read rather than cached for the whole run.
+    # `_status_text` returns "" both when the app genuinely said nothing and
+    # when the node it is reading has gone stale -- the two are
+    # indistinguishable from the outside, and a node that dies mid-run makes
+    # every control after it fail identically. Seen exactly that shape on
+    # this desktop: nine consecutive push buttons on one tab, every one
+    # reporting '', where the same controls passed in the previous run.
+    # Re-resolving cannot mask a real miss: if the application really did
+    # not report, the fresh node reads the same text and the failure still
+    # stands.
+    _status = {"el": _resolve_status_bar()}
+
+    def status_text():
+        text = _status_text(_status["el"])
+        if not text:
+            _status["el"] = _resolve_status_bar()
+            text = _status_text(_status["el"])
+        return text
 
     def tap(name):
         gui.tap_key(name)
@@ -328,6 +368,16 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
             _safe_click(el)
         elif role in ("entry", "text"):
             if seek_focus(el):
+                type_text("torture")
+            elif _focus_via_api(el):
+                # Not reachable by Tab at all -- confirmed live on
+                # Hyprland/Omarchy, where "Rich Text" never took focus in 70
+                # presses and publishes only a "Set Focus" action. pyguitest's
+                # own `Element.focus()` does move real focus there (verified
+                # by driving it and then typing), so this is the library's
+                # primitive rather than a way around it; `seek_focus` stays
+                # first because it is the route confirmed on the desktops
+                # where `focus()` was measured not to stick.
                 type_text("torture")
         elif role == "spin button":
             if seek_focus(el):
@@ -420,7 +470,27 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 if child is not None:
                     _safe_click(child)
         elif role in ("page tab list", "layered pane"):
-            _safe_click(el)
+            if el.actions:
+                _safe_click(el)
+            else:
+                # A QToolBox container publishes no actions of its own, and
+                # the application reports `currentChanged` for one -- so a
+                # click on the container cannot report even in principle,
+                # because it switches no page. Its section headers are real
+                # push buttons ("Section One/Two/Three", each offering
+                # "Press"), and pressing one is also what a *user* does to
+                # switch pages, so this is the semantic action rather than a
+                # way around a missing one. The last header is chosen
+                # because the first is already the open page, and switching
+                # to the page already shown fires nothing.
+                headers = [
+                    c for c in el.children
+                    if c.role == "push button" and c.name
+                ]
+                if headers:
+                    _safe_click(headers[-1])
+                else:
+                    _safe_click(el)
 
     def enumerate_now():
         try:
@@ -518,7 +588,7 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
         return ok
 
     def status_shows(name):
-        return name in _status_text(status_bar_el)
+        return name in status_text()
 
     def _find_fresh(name, role):
         """Re-find `name`/`role`'s current element -- a reflow (eg Toolbar
@@ -556,7 +626,7 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
             if name not in ("Open", "Save As") and not gui.wait_until(
                 lambda: status_shows(name), timeout=0.8, interval=0.1
             ):
-                failures.append(f"{name} ({role}) -> {_status_text(status_bar_el)!r}")
+                failures.append(f"{name} ({role}) -> {status_text()!r}")
                 return False
             return True
         interact(el, role)
@@ -570,7 +640,7 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
         interact(el, role)
         if gui.wait_until(lambda: status_shows(name), timeout=0.8, interval=0.1):
             return True
-        failures.append(f"{name} ({role}) -> {_status_text(status_bar_el)!r}")
+        failures.append(f"{name} ({role}) -> {status_text()!r}")
         return False
 
     drive_items(items)

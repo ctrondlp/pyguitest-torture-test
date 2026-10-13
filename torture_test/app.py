@@ -356,6 +356,7 @@ class TortureTestWindow(QMainWindow):
         self._status_count = QLabel()
         self._status_count.setObjectName("statusControlCount")
         bar.addPermanentWidget(self._status_count)
+
     def _build_dock(self) -> None:
         self._dock = QDockWidget(tr("Tool Palette"), self)
         self._dock.setObjectName("toolPalette")

@@ -239,10 +239,10 @@ def _wait_new_app_window(gui, app_pid, before_titles, timeout):
 def _status_text(status_bar_el):
     """The status bar's current message, via AT-SPI.
 
-    Takes the status bar Element directly -- see drivers/linux.py's
-    identical function for why re-searching for it on every poll (up to 8
-    times per control, twice with the retry) turned into the dominant cost
-    of the whole run.
+    Takes the status bar Element directly rather than re-searching for it
+    on every poll: the poll runs up to eight times per control, twice over
+    once the retry is counted, and a `find_elements` walk on each of those
+    turned this function into the dominant cost of a whole run.
     """
     if status_bar_el is None:
         return ""
@@ -493,11 +493,13 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
         return name in _status_text(status_bar_el)
 
     def drive_one(name, role, x, y, w, h):
-        # No live re-fetch here: see drivers/linux.py's identical
-        # comment -- (x, y, w, h) is already fresh from the batch this
-        # control was just pulled from, and re-fetching unconditionally
-        # before every click cost one more full find_elements walk per
-        # control. live_extents() still runs on the retry path below.
+        # No live re-fetch here: (x, y, w, h) is already fresh from the
+        # batch this control was just pulled from, and re-fetching
+        # unconditionally before every click cost one more full
+        # find_elements walk per control. live_extents() still runs on the
+        # retry path below. (The pointer-free drivers re-find instead --
+        # see `_find_fresh` in drivers/linux.py -- because an action click
+        # needs a live node, not a rectangle.)
         cx, cy = int(x) + int(w) // 2, int(y) + int(h) // 2
         point(cx, cy)
         if role == "push button" and name in POPUP_ONLY_BUTTONS:
@@ -541,7 +543,7 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
         return False
 
     # A miss on one control used to abort the rest of the walk entirely --
-    # see drivers/linux.py's identical comment for the full story
+    # see AGENTS.md's driver contract, item 3, for why that was removed
     # (confirmed live: this is why GhostBSD never reached tabs 5-9 once
     # "Model Tree" missed on tab 4). Every failure is still recorded in
     # `failures` -- driving the rest of the app is the point.
