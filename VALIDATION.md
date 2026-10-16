@@ -243,7 +243,7 @@ the regenerate).
 
 The two outputs differ instructively:
 
-| | macOS | **Two menu dialogs short — reproducible, newly *visible*** (2026-10-15, pyguitest 0.17.1) — 16 controls found and driven; `Tools/Message Boxes/Information` and `Tools/Progress Dialog…` both end "its dialog never closed". Not a new break: the old code discarded `wait_window_close`'s return value, so a dialog that stayed open was silently ignored and only showed up as the *next* control failing. Both dialogs close on the **first** Escape when driven in isolation, and the failures reproduce with the menu walk alone (no preceding control pass), so it is accumulated modal state, not an inability — at the end of a walk several dialogs are still listed. pyguitest's own side checks out: `focus_window`/`wait_window_focus` return True on the dialog, `wait_window_close` compares by handle and answered correctly in every case that could be verified. Same family as the `_SNAPSHOT_SECONDS` finding in `_wait_new_app_window`'s docstring. `Undo History` (the 2026-10-14 gap) did not recur | Dedicated test box (VM); Quick Note hot corner disabled. **A locked or sleeping Mac looks exactly like a broken driver** — check `pmset -g powerstate IODisplayWrangler` first |
+| | macOS | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1, twice in a row, ~110 s) — the day's two "dialog never closed" failures were macOS's own `View > Enter Full Screen` menu item: not a dialog, it put the app into native full screen before the walk reached Tools, and everything after ran against that. The driver now drives it as a toggle — enter, verify the item flipped to `Exit Full Screen`, leave, verify it flipped back — re-reading the menu bar fresh for the check, because the children list captured at walk start keeps reporting the old name. macOS's AutoFill/dictation/emoji items (its own, in the app's Edit menu, opening system UI in other processes) are skipped. `Undo History` (the 2026-10-14 gap) did not recur | Dedicated test box (VM); Quick Note hot corner disabled. **A locked or sleeping Mac looks exactly like a broken driver** — check `pmset -g powerstate IODisplayWrangler` first |
 |---|---|---|
 | Button / check box | `gui.button(...).click()` / `gui.checkbox(...).click()` | same |
 | Tab | `element(role=Role.RADIO_BUTTON, ...).click()` | `element(role=Role.PAGE_TAB, ...).select()` |
@@ -375,52 +375,81 @@ scale = 1 })`, then `hyprctl reload`.
    is what a *user* does to switch pages. The driver clicks the **last**
    header, because the first is already the open page.
 
-## 2026-10-15: pyguitest 0.17.1 verified across all seven boxes
+## 2026-10-15: pyguitest 0.17.1 green on all eight boxes
 
-Every box was up for the first time in this effort. Results on the bumped
-(still uncommitted) 0.17.1 / recorder 0.9.1 trees, deployed to `/tmp/tt-run`
-and reached through `PYTHONPATH` so no box's own checkout was touched:
+Every box was up at once for the first time, a new Ubuntu box joined, and
+the round ended with **`all controls verified` on all eight** — including
+the first full widget-level run ever on niri. Everything ran the bumped
+(still uncommitted) 0.17.1 / 0.9.1 trees, deployed to `/tmp/tt-run` and
+reached through `PYTHONPATH`, no box's own checkout touched.
 
 | Box | Result |
 |---|---|
 | GhostBSD .77 | `all controls verified`, 2254 unit tests, full recorded-session replay |
-| Omarchy .82 (Hyprland) | `all controls verified`, exit 0, 740 s — **first ever clean run there since 2026-10-13** |
-| Debian .78 (GNOME Wayland) | `all controls verified`, exit 0, 474 s |
-| COSMIC .79 | `all controls verified`, exit 0, 423 s (7 clipped) |
-| Windows .18 | `all controls verified`, driver-exit 0 (3 clipped) |
-| macOS .36 | 2 menu-dialog failures, reproducible — see the matrix row |
-| KaOS/niri .83 | window level only; still no `gtk3`/dogtail, so no widget run |
+| Omarchy .82 (Hyprland) | `all controls verified`, twice — first clean runs since 2026-10-13 |
+| Debian .78 (GNOME Wayland) | `all controls verified`, twice |
+| COSMIC .79 | `all controls verified`, twice |
+| Windows .18 | `all controls verified`, twice (Scheduled Task into session 1) |
+| macOS .36 | `all controls verified`, twice — full screen driven, not skipped |
+| KaOS/niri .83 | `all controls verified` — first ever on niri |
+| Ubuntu 26.10 .88 | `all controls verified` — new box, provisioned bare-to-green same day |
 
-**Two things that were not bugs in the code, and cost the most time.**
+**Environmental, found and routed around (now in AGENTS.md):** Omarchy's
+"no window ever takes keyboard focus" was its shell's 300 s idle session
+lock, invisible to `hyprctl` and `loginctl` alike; and running over ssh
+without `XDG_CURRENT_DESKTOP` makes the doctor read `compositor other`, so
+no compositor backend joins and on Wayland `ELEMENT_GEOMETRY` silently
+goes missing — the verdict then reads "NO CONTROLS FOUND" with the fixture
+publishing hundreds of elements. `scripts/run-box-tests.sh` now takes the
+whole session environment from the compositor's own process (procstat on
+FreeBSD), and finds `NIRI_SOCKET`/`SWAYSOCK` from their socket files.
 
-1. *Omarchy's missing keyboard focus was its session lock* — see the matrix
-   row. The 2026-10-14 guess (a layer surface holding focus) was wrong.
-2. *Debian and COSMIC first reported `NO CONTROLS FOUND`* with the fixture
-   plainly on screen and 583 elements published. Cause: the harness ran over
-   ssh without `XDG_CURRENT_DESKTOP`, so pyguitest's doctor said `compositor
-   other`, no compositor backend joined, the composite came up
-   `atspi+uinput`, and on Wayland that costs `ELEMENT_GEOMETRY` — AT-SPI
-   rectangles are window-relative there, so geometry is only advertised once
-   a window source is wired in. `gui.extents()` then raised
-   `CapabilityUnsupported` for all 154 candidate elements,
-   `enumerate_controls` swallowed it, and the verdict read as an empty
-   fixture. Checked against the box's installed 0.16.3: identical, so **not
-   a 0.17.1 regression**. Taking the session environment from the
-   compositor's own `/proc/<pid>/environ` fixed both boxes, and the trap is
-   now in AGENTS.md.
+**Fixed in pyguitest (one change):** `extents()` returned `None` when an
+element's window had no position to absolutize against — every caller
+unpacking a rectangle then died with `TypeError: cannot unpack non-iterable
+NoneType object`. Measured on niri, where the compositor reports no
+position for tiled windows at all. It now raises `CapabilityUnsupported`
+naming the cause and the way forward; the two unit tests that pinned the
+old `None` were updated to pin the refusal.
 
-**Driver changes verified live** (uncommitted, in `cosmic.py`/`debian.py`/
-`linux.py`): `seek_focus` declining at once when the window never took
-focus, and `faulthandler.enable()` + `SIGUSR1` replacing the periodic
-`dump_traceback_later(25, repeat=True)` that segfaulted a run on Omarchy.
+**Fixed in the drivers:**
 
-**Not run anywhere this round:** the unit suite on most boxes — only
-GhostBSD has `pytest` in its interpreter; Debian, COSMIC, niri and the Mac
-do not, and installing into the maintainer's own venvs is not this
-harness's business. Windows ran it and tripped only on `test_docs.py`,
-which reads `README.md` from the repo root (docs are deliberately not
-deployed); with that and `test_api_docs.py`/`test_style.py` deselected it
-is the right suite to run there.
+- *macOS* — `View > Enter Full Screen` (macOS's own menu item) is driven as
+  a toggle instead of being clicked and abandoned, which had left the app
+  full-screen for the rest of the walk and was the whole cause of the two
+  "dialog never closed" failures (both dialogs pass in isolation). The
+  check re-reads the menu bar fresh: the stale children list never shows
+  the name flip. AutoFill/dictation/emoji system items are skipped.
+- *All six* — the whole `Slow Dialog` submenu and `Help > Dump Controls`
+  joined `MENU_DIALOG_ITEMS`: each opens an application-modal dialog
+  (delayed, for the Slow ones), and five drivers were passing with them
+  unlisted by luck.
+- *AT-SPI drivers* — a control whose window has no screen position is kept
+  and driven (actions + real-focus keys need no coordinates) instead of
+  being dropped by the extents filter; the tab bar is found by grouping on
+  its containing tab list when there is no `y` to rank by; and
+  `seek_focus` sends Ctrl+Tab every 25th press, because a `QTextEdit`
+  consumes Tab as input and the walk otherwise never leaves it.
+- *AT-SPI drivers* — spin button, combo box, slider and dial got the same
+  `_focus_via_api` fallback the entry branch already had: on KaOS the five
+  spin buttons sit after the Notes text area in the tab order, so the Tab
+  walk could not reach them at all, and `Element.focus()` could. Those
+  five were the last failures between an 84-control run and a clean one.
+- *cosmic/debian/linux* — `seek_focus` declines immediately when the
+  window never took keyboard focus (a locked Omarchy turned every keyboard
+  control into a 60-press timeout), and the periodic
+  `faulthandler.dump_traceback_later(25, repeat=True)` is gone: its
+  GIL-less frame walk eventually lands on a thread being born — pyguitest's
+  atspi backend starts one per bounded call — and segfaulted a run
+  (coredumpctl: crashing thread = the watchdog, inside libpython).
+  `faulthandler.enable()` + `SIGUSR1` replaces it; `kill -USR1 <pid>`
+  dumps once, on request.
+
+**Scripts added** (`scripts/`): `run-box-tests.sh` (deploy-and-run with the
+session env taken from the compositor process), `deploy-box.sh`,
+`run-macos-tests.sh`, `win-run.bat`, `disable-idle-lock.sh` /
+`disable-idle-lock.cmd` (verified on Omarchy, GhostBSD, niri; best-effort
+branches for the rest).
 
 ## Platform matrix
 
@@ -432,7 +461,8 @@ is the right suite to run there.
 | Debian 13 (Wayland) | **Fully clean — zero known bugs** (re-verified 2026-10-15 on pyguitest 0.17.1: `all controls verified`, exit 0, 474 s, nothing clipped; doctor reads `mutter (GNOME)`) (2026-10-12) — pointer-free driver (same strategy as COSMIC), `all controls verified` on 2 consecutive full runs after fixing 3 real bugs — see below | Dedicated test box |
 | macOS | **One control short — a driver gap, not a pyguitest bug** (2026-10-14) — 16 controls found and driven, `Undo History` the only failure: its rows do not move the undo stack through the AX API, so the interaction reports nothing. Clean twice on 2026-10-13 before that. 7 real bugs fixed along the way, incl. the driver clicking the Dock's Notes icon (which stole keyboard focus and made whole runs look like hangs) and 2 genuine pyguitest bugs — see below | Dedicated test box (VM); Quick Note hot corner had to be disabled. **A locked or sleeping Mac looks exactly like a broken driver**: Quartz keeps listing windows while the AX tree returns nothing, so a run reports zero controls — check `pmset -g powerstate IODisplayWrangler` before debugging code |
 | Omarchy / Hyprland (Arch) | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, exit 0, 740 s. The long-standing "Hyprland grants no window keyboard focus" block was **the session being locked**: Omarchy's shell locks after 300 s idle through its own PAM-backed `ext-session-lock`, and Hyprland refuses `focusWindow` outright while a lock is up, while every dispatch still replies `ok`, `hyprctl layers` lists no lock surface and `loginctl` says `LockedHint=no`. Unlocked at the console + `omarchy-toggle-idle stay-awake`, the same tree passed first time. Ask the shell before debugging focus: `OMARCHY_PATH=/usr/share/omarchy omarchy-shell lock isLocked` | Dedicated test box (VBox); keep it unlocked and awake — `scripts/disable-idle-lock.sh`. Pointer injection is still a *permission* away (`/dev/uinput` root-only, no ACL), not needed for a pass |
-| KaOS / niri | **Window backend validated; widgets cannot run yet** (2026-10-14) — the last compositor that had never met a live session. `windows()`, `activate_window`, `active_window` and `screens()` all answered from a real niri 26.04, and the run found a genuine pyguitest bug: `is_window_viewable` returned False for a window filling half the screen. The fixture itself has not run there: KaOS packages no accessibility stack, and dogtail additionally needs the Gtk-3.0 typelib it imports unconditionally | Dedicated test box; `/dev/uinput` carries an ACL here, so niri gets a real pointer *and* keyboard — better input than COSMIC or Debian |
+| KaOS / niri | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, the first full widget-level run ever on niri, closing the last compositor gap in the matrix. Getting there took one provisioning step (`gtk3`, root — KaOS ships no GTK and dogtail's `utils.py` requires the Gtk-3.0 typelib at import), one package repair (`pip install pyside6` into `~/tt-venv`: KaOS had `pyside6 6.12.0` against `qt6-base 6.11.2`, so system PySide6 could not even import QtCore; the wheel bundles its own Qt), and `NIRI_SOCKET` exported from the socket file (niri does not carry it in its own environment, and without it the niri backend never joins the composite). niri reports no position for a tiled window (`tile_pos_in_workspace_view` null even on screen), so there are no screen coordinates there at all — pyguitest now refuses `extents()` with a typed `CapabilityUnsupported` instead of returning `None`, and the drivers keep such controls and drive them through actions and real-focus keys, which need no coordinates | Dedicated test box (VM). `scripts/run-box-tests.sh` handles the env; the box's venv is `~/tt-venv` |
+| Ubuntu 26.10 (GNOME Wayland) | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, exit 0, 873 s, on a box provisioned from bare that same day: no pip, no ensurepip, no virtualenv, no curl, no gcc, so the venv was built `--system-site-packages --without-pip` and pip bootstrapped with urllib; PySide6/dogtail/pytest from PyPI on top of the system `gi`. Needed beyond that: the pyguitest GNOME Shell extension (user-level install + a log out/in — Wayland cannot reload the Shell), `toolkit-accessibility` true (was false, same as Debian), and uinput (`python3-evdev` via apt + an ACL on `/dev/uinput`; pip cannot build evdev there and libei answered `BackendUnavailable` on this session). All of it is `~/setup-pyguitest-ubuntu.sh` and `~/fix-pyguitest-ubuntu.sh` on the box, both idempotent. Unit suite: 2243 passed there | New (eighth) box, `ssh paulsden@192.168.1.88` |
 | Windows | **Fully clean — zero known bugs** (re-verified 2026-10-15 on pyguitest 0.17.1 via a Scheduled Task into session 1: `all controls verified`, driver-exit 0, 3 controls clipped; re-verified 2026-10-13 after the restructure, then again after `QUndoView`/`QErrorMessage` — 21/21 self-test, `all controls verified`, `EXIT=0`, empty stderr, nothing leaked; the intermediate failure and its cause are below) — brand-new driver, `all controls verified` on 2 consecutive full runs on the first attempt | Dedicated test box; must run via a Scheduled Task bound to the interactive session, not plain SSH — see below |
 
 ## 2026-10-11 session
