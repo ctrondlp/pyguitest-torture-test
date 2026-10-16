@@ -84,14 +84,44 @@ They share one contract:
    one early miss then left the rest of the app unexercised and hid how much
    was actually broken.)
 4. Walk every tab page and the whole menu bar, not just the first visible page.
-5. All five dedicated test platforms (GhostBSD, COSMIC, Debian, Windows,
-   macOS) reach `all controls verified` with zero failures — see
-   `VALIDATION.md` for the per-platform record. `drivers/linux.py`
-   targets a *live local desktop* rather than a dedicated box, is not part
-   of that matrix, and its last fix has not been re-run there; **ask before
-   launching anything on a local desktop.** The remaining step is the
-   recorder round-trip: record a session with pyguitest-recorder and check
-   the generated source matches the recording.
+5. **Never report success for a run that verified nothing.** An empty
+   enumeration means no interaction can fail, so the verdict would read as a
+   pass over the whole fixture: measured on macOS, three lines of output,
+   `all controls verified`, exit 0 — while the machine was sitting at its
+   lock screen. Every driver now prints `NO CONTROLS FOUND` and returns 2
+   instead. No floor is imposed above zero, because real coverage varies
+   with screen size (17 controls at 1920x1080, 13 at 1024x768, 7 at
+   1280x800, all genuine passes).
+6. **Say when the window clips part of the fixture.** Controls whose
+   rectangle falls outside the window are skipped by item 1, correctly, and
+   the verdict then covers only the rest. Drivers print
+   `PARTIAL COVERAGE: N expected control(s) are outside the visible window`
+   beside the count, because without it three platforms printed the same
+   verdict over 17, 13 and 7 controls.
+7. **Act on `wait_window_focus`'s answer.** It returns a bool, and
+   discarding it turns one diagnosable condition into one failure per
+   keyboard-driven control — 27 of them on Omarchy, each showing the
+   *previous* control's status line, for a single cause. Warn once and keep
+   going: action clicks still work without focus.
+8. Current status: four of the six dedicated platforms reach
+   `all controls verified` — GhostBSD, COSMIC, Debian and Windows. macOS is
+   one control short (`Undo History`) and Omarchy is blocked by a compositor
+   that grants no window keyboard focus; neither is a pyguitest defect. See
+   `VALIDATION.md` for the per-platform record. `drivers/linux.py` targets a
+   *live local desktop* rather than a dedicated box, is not part of that
+   matrix, and its last fix has not been re-run there; **ask before
+   launching anything on a local desktop.**
+9. The recorder round-trip is **done**, on all three platforms where the
+   recorder has a capture backend (`x11`, `win32`, `macos`): GhostBSD,
+   Windows and macOS were recorded, the generated scripts checked against
+   `EXPECTED_CONTROLS` and the app source with no fabricated names, and then
+   replayed. Replaying found three real recorder bugs. It also found the
+   thing to know before recording a driver again: **a recording made from a
+   machine-speed driver carries timings too tight to replay**, because the
+   generator inserts the waits it observed and a driver clicking flat out
+   leaves none to observe. The Wayland boxes cannot be recorded at all --
+   there is no Wayland capture backend, and their drivers click through
+   AT-SPI actions, which emit no input events.
 
 ## Platform / backend matrix
 
@@ -109,6 +139,7 @@ built around that rather than fighting it.
 | Windows 11 | `uia` + `win32` | pointer + keyboard, both work |
 | macOS | `macos` tree + `macquartz` input | pointer + keyboard, both work |
 | Omarchy / Hyprland (Arch) | `hyprland` windows, `atspi` tree, `wtype` keyboard, `grim` capture | **pointer-free**, but for a different and *fixable* reason — see below |
+| KaOS / niri | `niri` windows, `uinput` input | pointer + keyboard both available (`/dev/uinput` carries an ACL here), but **no `atspi` tree**: KaOS packages no accessibility stack, so the fixture cannot run there yet. No `drivers/niri.py` exists; `drivers/cosmic.py` is the likely fit, as it is for Hyprland, and has not been tried |
 
 On COSMIC, Debian and the local GNOME/Wayland desktop, `uinput` pointer
 events are accepted by the kernel
@@ -120,17 +151,39 @@ accessible action) and reach keyboard-only controls by Tab-seeking until
 
 ## Omarchy / Hyprland, the newest target
 
-The first wlroots compositor this project has reached — Hyprland and niri
-were previously on record as never having met a live one. Several things
-about it are worth knowing before touching it.
+The first wlroots compositor the *fixture* ran on — sway had been exercised
+earlier for window control alone, and niri followed on 2026-10-14. Several
+things about it are worth knowing before touching it.
 
-**pyguitest needed no changes for it.** `connect()` composes
+**It composed itself correctly from the start.** `connect()` composes
 `hyprland+atspi+input:wtype+capture:grim+clipboard:wl-copy+imagesearch:compare`
 on its own, with every window capability (list, state, activate, minimize,
 geometry, placement, resize, **pid**, at-point) served by `hyprland`.
-`pyguitest` with no subcommand already prints `compositor wlroots
-(Hyprland)` and lists `hyprctl` among its tools, and `hints.py` already knew
-Arch's package names. Nothing had to be added.
+`pyguitest` with no subcommand prints `compositor wlroots (Hyprland)` and
+lists `hyprctl` among its tools, and `hints.py` already knew Arch's package
+names.
+
+**But it did eventually need a pyguitest change, and the failure was
+silent.** On 2026-10-14 the same fixture and driver failed with 27
+interactions reporting nothing. Hyprland had started parsing `hyprctl
+dispatch` as Lua and rejecting the long-standing
+`focuswindow address:0x...` form, so `activate_window`, `move_window`,
+`resize_window` and `minimize_window` were all answering with an error
+string and doing nothing — no window ever held focus, and every key `wtype`
+sent went nowhere. pyguitest now sends `hl.dsp.focus({ window = ... })` and
+friends, discovering which syntax a daemon wants from its own reply. **If
+window control appears to do nothing on a wlroots box, check the dispatch
+reply before suspecting the driver.**
+
+**Focus is still unobtainable on that session, and it is not pyguitest's.**
+`hyprctl activewindow` answers `Invalid` with one mapped, visible,
+`acceptsInput` window present, and the fixture reports
+`focusHistoryID: 1` — so a layer surface (this desktop has two, both owned
+by the shell) holds position 0. Ruled out: the dispatch syntax, a missing
+keyboard, a lock screen, `noinitialfocus` rules, the cursor sitting outside
+the window, and every `hl.dsp.focus` selector. A real pointer click is how
+focus normally leaves a layer surface, which is the other reason the
+`input` group matters here.
 
 **`drivers/cosmic.py` runs here unmodified**, which is why there is no
 `drivers/hyprland.py`. The COSMIC driver matches windows by title because
@@ -254,11 +307,43 @@ reach, such as a `QTextEdit` that publishes only `Set Focus`.
   `STATUS_CONTROL_C_EXIT`), create the task fresh each run rather than
   re-running a completed one, and invoke Python as `py -u` — buffered output
   makes a working run look like a hang.
+- **Export `XDG_CURRENT_DESKTOP` over ssh, or the run finds zero controls.**
+  Without it pyguitest's doctor reports `compositor other`, no compositor
+  backend joins the composite, and on Wayland that silently costs
+  `ELEMENT_GEOMETRY` — AT-SPI rectangles there are window-relative, so
+  geometry is only advertised once a window source (the gnomeshell
+  extension, cosmic, hyprland…) is wired in. `gui.extents()` then raises
+  `CapabilityUnsupported` for every element, `enumerate_controls` swallows
+  it, and the run says **"NO CONTROLS FOUND"** with the app plainly on
+  screen and 583 elements published. Measured on Debian 2026-10-15; the
+  same env lands `atspi+uinput` instead of `atspi+gnomeshell+uinput`.
+  Take the whole set from the compositor's own process rather than
+  guessing: `tr '\0' '\n' </proc/$(pgrep -x gnome-shell)/environ`, and
+  export `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`,
+  `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS` from it. Check
+  `pyguitest doctor` names the real compositor before blaming the fixture.
+- **A locked box looks exactly like a broken driver — on every platform.**
+  macOS keeps listing windows while the AX tree goes empty; Hyprland answers
+  `ok` to every focus dispatch while `activewindow` stays `Invalid`, with
+  nothing in `hyprctl layers`, `loginctl` or its log to say why (Omarchy's
+  shell locks after 300 s idle; `OMARCHY_PATH=/usr/share/omarchy
+  omarchy-shell lock isLocked` is the only oracle). Before debugging focus,
+  check the lock; before a run, `scripts/disable-idle-lock.sh` (Windows:
+  `scripts/disable-idle-lock.cmd`) turns off idle lock, blanking and sleep
+  for the session it is run in. Verified on Omarchy, GhostBSD and niri
+  2026-10-15; the GNOME/Xfce/KDE/COSMIC/macOS branches are best-effort
+  until run on those boxes.
 - **A wedged accessibility call survives SIGTERM.** If a driver stops with no
   output and will only die to SIGKILL, suspect a blocked AT-SPI/GI call, not
   the app; pyguitest now bounds those and raises `BackendCallTimeout`
-  instead. `faulthandler.dump_traceback_later(N, repeat=True)` names the
-  frame.
+  instead. The drivers register `faulthandler` on `SIGUSR1`, so
+  `kill -USR1 <driver pid>` names the frame once, on request. Do **not**
+  reach for `faulthandler.dump_traceback_later(N, repeat=True)`: it walks
+  every thread's frames without the GIL on a timer, and in a process that
+  starts a thread per bounded AT-SPI call it eventually coincides with a
+  `pthread_create` and segfaults the run (Omarchy, Python 3.14.7 — the
+  sixth periodic dump of a 150 s run; `coredumpctl` put the crashing thread
+  in the watchdog, inside libpython, with no libatspi frame anywhere).
 - **"Pointer injection is broken" does not mean the box is blocked.** On
   three of the six hosts `uinput` pointer events are dropped before the
   compositor while *keyboard* injection through the same backend works

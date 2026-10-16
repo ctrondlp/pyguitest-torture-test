@@ -145,7 +145,13 @@ MENU_DIALOG_ITEMS = {
     "Get Text", "Get Integer", "Get Item",
     "Color Picker…", "Font Picker…", "File Dialog…",
     "Progress Dialog…", "Custom Dialog…", "Wizard…", "MDI Workspace…",
-    "1 second",
+    # The whole Slow Dialog submenu, not just the first entry: each one
+    # opens a modal dialog after its own delay (`QTimer.singleShot`), and
+    # an undismissed one surfaces in the middle of a later leaf and blocks
+    # it. `_wait_new_app_window`'s 15 s budget covers the 10 s case.
+    "1 second", "3 seconds", "5 seconds", "10 seconds", "Custom…",
+    # Opens a modal "Control Inventory" window that stays up until closed.
+    "Dump Controls",
     "About TortureTest…", "About Qt…",
 }
 
@@ -290,6 +296,7 @@ def enumerate_controls(gui, app_pid, expected, app_frame=None):
                 pass
             break
     found = []
+    clipped = []
     for el in elements:
         try:
             if getattr(el, "pid", None) != app_pid:
@@ -310,13 +317,22 @@ def enumerate_controls(gui, app_pid, expected, app_frame=None):
             continue
         try:
             x, y, w, h = gui.extents(el)
+        except pyguitest.CapabilityUnsupported:
+            # The element has a rectangle; its *window* has no position, so
+            # there are no screen coordinates on this compositor for
+            # anything. Keep it -- every interaction below goes through the
+            # accessible action or Tab-walked focus, never a coordinate --
+            # and accept that clipping cannot be assessed here.
+            found.append((name, role, el))
+            continue
         except Exception:
             continue
         if clip_bottom is not None and y + h > clip_bottom:
+            clipped.append((name, role))
             continue
         if w > 0 and h > 0:
             found.append((name, role, x, y, w, h))
-    return found
+    return found, clipped
 
 
 def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
@@ -519,9 +535,26 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
                 failures.append(f"{name} ({role}) -> dialog never appeared")
                 return False
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             tap("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                tap("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{name} ({role}) -> its dialog never closed; "
+                        "every control after this one ran against a modal window"
+                    )
+                    return False
             if name not in ("Open", "Save As") and not gui.wait_until(
                 lambda: status_shows(name), timeout=0.8, interval=0.1
             ):
@@ -756,9 +789,28 @@ def drive_menus(gui, app_frame, app_pid, failures):
                     close_all()
                     return
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             gui.tap_key("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                gui.tap_key("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{'/'.join([*path, name])} (menu item) -> its "
+                        "dialog never closed; every later interaction ran "
+                        "against a modal window"
+                    )
+                    close_all()
+                    return
         close_all()
         gui.wait_until_gone(role="menu", within=app_frame, timeout=1.0)
 
@@ -796,15 +848,46 @@ def main():
             # with a blind sleep, the very first control driven after
             # launch consistently missed, every run -- the window had not
             # actually taken focus yet when that first click landed.
-            gui.wait_window_focus(window, timeout=5.0)
+            if not gui.wait_window_focus(window, timeout=5.0):
+                # A real answer, not an exception: the compositor declined to
+                # focus the window, so every key sent from here lands somewhere
+                # else. Said once, loudly, because the alternative is one
+                # "interaction did not report" per keyboard-driven control --
+                # 27 of them on Omarchy, each showing the previous control's
+                # status line, for a single cause. Action clicks still work
+                # without focus, so the run continues rather than aborting.
+                print("WARNING: the window never took keyboard focus; "
+                      "controls that need typing or Tab will not report")
         # Scope every search to the app's own frame: on a live desktop
         # the AT-SPI tree spans every app (VS Code's is huge), so an
         # unscoped find_elements walks all of it and looks stuck.
         app_frame = _wait_app_frame(gui, app.pid, timeout=5.0)
         expected = set(expected_controls())
-        items = enumerate_controls(gui, app.pid, expected, app_frame)
+        items, clipped = enumerate_controls(gui, app.pid, expected, app_frame)
         print(f"actable controls found (visible): {len(items)}")
+        if clipped:
+            # Geometry, not a fault: these are expected controls
+            # whose rectangle fell below the status bar, so the
+            # window is clipping the fixture -- usually a screen
+            # smaller than it needs. Said out loud because the
+            # verdict below covers only what was driven.
+            print(f"PARTIAL COVERAGE: {len(clipped)} expected control(s) are "
+                  f"outside the visible window and will not be driven; "
+                  f"a verdict below covers the rest only")
+            print(f"  skipped: {sorted(n for n, _ in clipped)[:12]}")
         print(f"  sample: {sorted({n for n, *_ in items})[:14]}")
+        if not items:
+            # Nothing was enumerated, so nothing below can fail and the
+            # verdict would read as a pass over the whole fixture. Measured
+            # on macOS, where the window had not come up: three lines of
+            # output, "all controls verified", exit 0. Coverage varies
+            # legitimately by screen size, so no floor is imposed beyond
+            # this one -- zero means the fixture was never reached.
+            print("NO CONTROLS FOUND: the fixture published none of the "
+                  "expected controls, so nothing was verified. Check that "
+                  "the application window actually opened and that the "
+                  "accessibility backend can see it.")
+            return 2
         failures = []
         drive(gui, items, failures, app.pid, expected, app_frame, window)
         drive_menus(gui, app_frame, app.pid, failures)

@@ -95,8 +95,23 @@ MENU_SKIP_ITEMS = {
     "Undo", "Redo", "Cut", "Copy", "Paste", "Select All",
     "Reset Demo Controls", "Dark Theme",
     "Zoom In", "Zoom Out", "Reset Zoom",
+    # AutoFill/dictation/emoji live in macOS's own Edit menu, not the
+    # fixture's: each one opens system UI in another process entirely
+    # (Keychain, the dictation HUD, the character palette), so driving
+    # them tests macOS, not this application, and leaves windows behind
+    # that nothing here owns.
+    "Contact…", "Passwords…", "Credit Card…",
+    "Start Dictation…", "Emoji & Symbols",
 }
 MENU_SKIP_SUBMENUS = {"Language"}
+FULLSCREEN_ITEMS = {"Enter Full Screen", "Exit Full Screen"}
+"""macOS's own View-menu toggle, driven as a pair rather than clicked once.
+
+Clicking one flips it into the other, so the walk enters full screen,
+verifies the flip, leaves again and verifies the flip back -- and the
+application is in the same state afterwards as before, which every later
+leaf depends on.
+"""
 MENU_DIALOG_ITEMS = {
     "Information", "Warning", "Critical", "Question",
     # Modal, like its QMessageBox siblings above -- it must be listed
@@ -104,9 +119,25 @@ MENU_DIALOG_ITEMS = {
     # application-modal dialog then blocks every later menu click.
     "Error Message",
     "Get Text", "Get Integer", "Get Item",
+    # File > Open… and File > Save As… open the same file dialog as Tools >
+    # File Dialog…, and on macOS that is the *native* NSOpenPanel: a
+    # separate process, application-modal, and it does not go away on its
+    # own. Left off this list the walk opened two of them and dismissed
+    # neither, and every later dialog leaf was then behind a modal panel --
+    # which is how `Tools/Message Boxes/Information` and
+    # `Tools/Progress Dialog…` came to fail a full run while both pass in
+    # isolation (confirmed live 2026-10-15: two stray `Open File` windows
+    # still listed at the end of the walk).
+    "Open…", "Save As…",
     "Color Picker…", "Font Picker…", "File Dialog…",
     "Progress Dialog…", "Custom Dialog…", "Wizard…", "MDI Workspace…",
-    "1 second",
+    # The whole Slow Dialog submenu, not just "1 second": each one opens a
+    # dialog after its own delay, and an undismissed one surfaces in the
+    # middle of a later leaf and blocks it. `_wait_new_app_window`'s 15 s
+    # budget covers the 10 s case.
+    "1 second", "3 seconds", "5 seconds", "10 seconds", "Custom…",
+    # Opens a "Control Inventory" window that stays up until dismissed.
+    "Dump Controls",
     "About TortureTest…", "About Qt…",
 }
 
@@ -401,6 +432,7 @@ def enumerate_controls(gui, app_pid, expected, app_window=None):
     except Exception:
         elements = []
     found = []
+    clipped = []
     for el in elements:
         try:
             if getattr(el, "pid", None) != app_pid:
@@ -421,9 +453,17 @@ def enumerate_controls(gui, app_pid, expected, app_window=None):
             x, y, w, h = gui.extents(el)
         except Exception:
             continue
-        if w > 0 and h > 0 and _clickable(gui, app_window, x, y, w, h):
-            found.append((name, role, el))
-    return found
+        if not (w > 0 and h > 0):
+            # No rectangle at all: not clipped, just not realised yet.
+            continue
+        if not _clickable(gui, app_window, x, y, w, h):
+            # A real rectangle outside the app's own window -- the case
+            # `_clickable` exists for, and the one worth counting: clicking
+            # its centre would hit whatever else owns that point.
+            clipped.append((name, role))
+            continue
+        found.append((name, role, el))
+    return found, clipped
 
 
 def drive(gui, items, failures, app_pid, expected, app_window=None, window=None):
@@ -481,12 +521,34 @@ def drive(gui, items, failures, app_pid, expected, app_window=None, window=None)
             # everywhere else) fires the real selection-changed signal --
             # confirmed live for a table row; used uniformly for all four
             # container roles rather than only the one it was found on.
-            child = next((c for c in el.children if c.actions), None)
-            if child is not None:
+            #
+            # Any row *except* the selected one: clicking the row a widget's
+            # selection already sits on changes nothing and emits nothing,
+            # which is how "Undo History" came back reporting the previous
+            # control's status line. A QUndoView's first actionable child is
+            # the row its stack index is on, so "the first one with actions"
+            # was reliably the one that could not work. drivers/linux.py
+            # skips the selected child for the same reason, found on the
+            # same control.
+            def _unselected_rows(container):
+                for candidate in container.children:
+                    if not candidate.actions:
+                        continue
+                    try:
+                        if candidate.selected:
+                            continue
+                    except Exception:
+                        # No selected state to read: still worth clicking,
+                        # which is the old behaviour for such a child.
+                        pass
+                    yield candidate
+
+            for child in _unselected_rows(el):
                 try:
                     child.click()
+                    break
                 except Exception:
-                    pass
+                    continue
         elif role == "layered pane":
             click()
 
@@ -567,9 +629,26 @@ def drive(gui, items, failures, app_pid, expected, app_window=None, window=None)
                 failures.append(f"{name} ({role}) -> dialog never appeared")
                 return False
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             tap("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                tap("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{name} ({role}) -> its dialog never closed; "
+                        "every control after this one ran against a modal window"
+                    )
+                    return False
             if name not in ("Open", "Save As") and not gui.wait_until(
                 lambda: status_shows(name), timeout=0.8, interval=0.1
             ):
@@ -677,6 +756,70 @@ def drive_menus(gui, app_pid, failures, window=None):
         except pyguitest.BackendCallTimeout as exc:
             failures.append(f"{bar_name} (menu discovery) -> {exc}")
 
+    def _view_item(wanted):
+        """Re-find a View-menu leaf by name.
+
+        Re-reads the menu *bar* from the session every call, not just the
+        View menu's children: the children list captured when the walk
+        started keeps reporting the old name after macOS flips the
+        full-screen item, so a search through it never sees the flip.
+        Confirmed live -- re-fetching sees `Exit Full Screen` within a
+        second, the cached list never does.
+        """
+        try:
+            fresh = next(
+                b for b in gui.find_elements(role="menu bar")
+                if getattr(b, "pid", None) == app_pid
+            )
+        except Exception:
+            fresh = bar
+        top = next((c for c in fresh.children if c.name == "View"), None)
+        menu = submenu_of(top) if top is not None else None
+        if menu is None:
+            return None
+        try:
+            return next((c for c in menu.children if c.name == wanted), None)
+        except Exception:
+            return None
+
+    def _toggle_full_screen_back(path, name):
+        """`name` has just been clicked, so the item now reads as its
+        opposite: confirm that, click it, and confirm it reads as `name`
+        again. Leaving the app full-screen would break every later leaf.
+        """
+        label = "/".join([*path, name])
+        opposite = ("Exit Full Screen" if name == "Enter Full Screen"
+                    else "Enter Full Screen")
+        if not gui.wait_until(lambda: _view_item(opposite) is not None,
+                              timeout=6.0, interval=0.3):
+            failures.append(
+                f"{label} (menu item) -> the item never flipped to "
+                f"{opposite!r}, so full screen did not toggle"
+            )
+            return
+        leaf = _view_item(opposite)
+        try:
+            leaf.click()
+        except pyguitest.BackendCallTimeout:
+            raise
+        except Exception:
+            failures.append(f"{label} (menu item) -> {opposite!r} click failed")
+            return
+        if not gui.wait_until(lambda: _view_item(name) is not None,
+                              timeout=8.0, interval=0.3):
+            failures.append(
+                f"{label} (menu item) -> {opposite!r} did not restore the "
+                f"window; the app is still full screen and every later "
+                f"interaction ran that way"
+            )
+            return
+        if window is not None:
+            try:
+                gui.activate_window(window)
+                gui.wait_window_focus(window, timeout=3.0)
+            except Exception:
+                pass
+
     def _click_leaf(path, name, item):
         if name in MENU_SKIP_ITEMS or name in MENU_SKIP_SUBMENUS:
             return
@@ -693,15 +836,36 @@ def drive_menus(gui, app_pid, failures, window=None):
         except Exception:
             failures.append(f"{'/'.join([*path, name])} (menu item) -> click failed")
             return
+        if name in FULLSCREEN_ITEMS:
+            _toggle_full_screen_back(path, name)
+            return
         if name in MENU_DIALOG_ITEMS:
             dialog = _wait_new_app_window(gui, before, timeout=15.0)
             if dialog is None:
                 failures.append(f"{'/'.join([*path, name])} (menu item) -> dialog never appeared")
                 return
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             gui.tap_key("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                gui.tap_key("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{'/'.join([*path, name])} (menu item) -> its "
+                        "dialog never closed; every later interaction ran "
+                        "against a modal window"
+                    )
+                    return
 
     for path, name, item in leaves:
         try:
@@ -721,12 +885,42 @@ def main():
             raise Failure("torture-test app window never appeared")
         app_pid = window.pid
         gui.activate_window(window)
-        gui.wait_window_focus(window, timeout=5.0)
+        if not gui.wait_window_focus(window, timeout=5.0):
+            # A real answer, not an exception: the compositor declined to
+            # focus the window, so every key sent from here lands somewhere
+            # else. Said once, loudly, because the alternative is one
+            # "interaction did not report" per keyboard-driven control --
+            # 27 of them on Omarchy, each showing the previous control's
+            # status line, for a single cause. Action clicks still work
+            # without focus, so the run continues rather than aborting.
+            print("WARNING: the window never took keyboard focus; "
+                  "controls that need typing or Tab will not report")
         app_window = _wait_app_window_element(gui, app_pid, timeout=5.0)
         expected = set(expected_controls())
-        items = enumerate_controls(gui, app_pid, expected, app_window)
+        items, clipped = enumerate_controls(gui, app_pid, expected, app_window)
         print(f"actable controls found (visible): {len(items)}")
+        if clipped:
+            # Geometry, not a fault: expected controls whose rectangle falls
+            # outside the app window, so the verdict below covers only what
+            # was driven. Said out loud because that verdict otherwise reads
+            # identically to a full pass.
+            print(f"PARTIAL COVERAGE: {len(clipped)} expected control(s) are "
+                  f"outside the visible window and will not be driven; "
+                  f"a verdict below covers the rest only")
+            print(f"  skipped: {sorted(n for n, _ in clipped)[:12]}")
         print(f"  sample: {sorted({n for n, *_ in items})[:14]}")
+        if not items:
+            # Nothing was enumerated, so nothing below can fail and the
+            # verdict would read as a pass over the whole fixture. Measured
+            # on macOS, where the window had not come up: three lines of
+            # output, "all controls verified", exit 0. Coverage varies
+            # legitimately by screen size, so no floor is imposed beyond
+            # this one -- zero means the fixture was never reached.
+            print("NO CONTROLS FOUND: the fixture published none of the "
+                  "expected controls, so nothing was verified. Check that "
+                  "the application window actually opened and that the "
+                  "accessibility backend can see it.")
+            return 2
         failures = []
         drive(gui, items, failures, app_pid, expected, app_window, window)
         drive_menus(gui, app_pid, failures, window)

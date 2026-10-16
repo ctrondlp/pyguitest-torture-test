@@ -2,7 +2,7 @@
 
 [![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Platforms driven clean](https://img.shields.io/badge/platforms%20driven%20clean-5-brightgreen.svg)](VALIDATION.md)
+[![Platforms driven clean](https://img.shields.io/badge/platforms%20driven%20clean-4%20of%206-yellow.svg)](VALIDATION.md)
 
 A desktop application stuffed with (nearly) every Qt control, built to be the
 worst case for [pyguitest](https://github.com/ctrondlp/pyguitest) — and for any
@@ -28,12 +28,19 @@ themes, resizes and platform changes.
 | Menu-bar and toolbar actions | **95** |
 | Tab pages | **9** |
 | Uniquely-named controls driven and verified | **105** |
-| Platforms driven clean, zero failures | **6** |
+| Platforms driven clean, zero failures | **4 of 6** |
 
 The last two rows are the ones that matter: every one of the 105 named
 controls is individually driven *and* confirmed landed by reading the status
-bar — plus the whole menu bar — on FreeBSD/GhostBSD, Pop!_OS/COSMIC, Debian,
-Omarchy/Hyprland, Windows and macOS. See [VALIDATION.md](VALIDATION.md) for the per-platform
+bar — plus the whole menu bar. Clean as of 2026-10-14 on FreeBSD/GhostBSD,
+Pop!_OS/COSMIC, Debian and Windows. Neither of the other two is a pyguitest
+defect. macOS is one control short — `Undo History`, whose rows do not move
+the undo stack through the AX API, a gap in this repo's own driver. Omarchy/
+Hyprland has no known bug in either project: Hyprland hands keyboard focus to
+a layer surface and will not give it to a window, which pyguitest reports
+accurately. The run there did find a real pyguitest bug — every window
+control had become a silent no-op after Hyprland changed its dispatch syntax
+— and that is fixed. See [VALIDATION.md](VALIDATION.md) for the per-platform
 record, including the bugs each run found in pyguitest itself.
 
 ## Requirements

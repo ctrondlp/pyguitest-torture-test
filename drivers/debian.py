@@ -37,6 +37,7 @@ from __future__ import annotations
 import faulthandler
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -44,7 +45,16 @@ from pathlib import Path
 
 import pyguitest
 
-faulthandler.dump_traceback_later(25, repeat=True)
+# Crash and on-demand hang diagnostics. Not `dump_traceback_later(...,
+# repeat=True)`: that walks every thread's frames from a watchdog thread,
+# without the GIL, on a timer -- and in a process that starts a thread per
+# bounded AT-SPI call (pyguitest's atspi backend, dozens a second) one of
+# those periodic walks eventually coincides with a pthread_create and
+# segfaults the run. Measured on Omarchy, Python 3.14.7: the sixth dump of
+# a 150 s run, crashing thread = the watchdog, inside libpython. A run that
+# looks hung gets `kill -USR1 <pid>` instead, which dumps once, on request.
+faulthandler.enable()
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 # The repo root: this file lives in <repo>/drivers/, so the app package
 # `torture_test` sits next to it one level up. Overridable for a checkout
@@ -88,7 +98,13 @@ MENU_DIALOG_ITEMS = {
     "Get Text", "Get Integer", "Get Item",
     "Color Picker…", "Font Picker…", "File Dialog…",
     "Progress Dialog…", "Custom Dialog…", "Wizard…", "MDI Workspace…",
-    "1 second",
+    # The whole Slow Dialog submenu, not just the first entry: each one
+    # opens a modal dialog after its own delay (`QTimer.singleShot`), and
+    # an undismissed one surfaces in the middle of a later leaf and blocks
+    # it. `_wait_new_app_window`'s 15 s budget covers the 10 s case.
+    "1 second", "3 seconds", "5 seconds", "10 seconds", "Custom…",
+    # Opens a modal "Control Inventory" window that stays up until closed.
+    "Dump Controls",
     "About TortureTest…", "About Qt…",
 }
 MENU_ROLES = ("menu", "menu item", "check menu item", "radio menu item")
@@ -268,6 +284,7 @@ def enumerate_controls(gui, app_pid, expected, app_frame=None):
                 pass
             break
     found = []
+    clipped = []
     for el in elements:
         try:
             if getattr(el, "pid", None) != app_pid:
@@ -288,16 +305,26 @@ def enumerate_controls(gui, app_pid, expected, app_frame=None):
             continue
         try:
             x, y, w, h = gui.extents(el)
+        except pyguitest.CapabilityUnsupported:
+            # The element has a rectangle; its *window* has no position, so
+            # there are no screen coordinates on this compositor for
+            # anything. Keep it -- every interaction below goes through the
+            # accessible action or Tab-walked focus, never a coordinate --
+            # and accept that clipping cannot be assessed here.
+            found.append((name, role, el))
+            continue
         except Exception:
             continue
         if clip_bottom is not None and y + h > clip_bottom:
+            clipped.append((name, role))
             continue
         if w > 0 and h > 0:
             found.append((name, role, el))
-    return found
+    return found, clipped
 
 
-def drive(gui, items, failures, app_pid, expected, app_frame=None):
+def drive(gui, items, failures, app_pid, expected, app_frame=None,
+          has_focus=True):
     """Drive each control via AT-SPI action clicks + real-focus keyboard
     input, verify via the status bar, then walk every main tab page.
     """
@@ -335,6 +362,13 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
     def type_text(text):
         gui.type_text(text)
 
+    def escape_focus():
+        """Ctrl+Tab: moves focus on where Tab itself is being consumed."""
+        try:
+            gui.send_keys("^{TAB}")
+        except Exception:
+            tap("Tab")
+
     def seek_focus(el, max_presses=MAX_SEEK_PRESSES):
         """Walk real keyboard focus onto `el` by pressing Tab, checking
         AT-SPI's own `focused` state after each press. `Element.click()`/
@@ -347,8 +381,24 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 return True
         except Exception:
             pass
-        for _ in range(max_presses):
-            tap("Tab")
+        if not has_focus:
+            # The window never took keyboard focus (main() said so once,
+            # loudly), so every Tab below would land somewhere else: 60
+            # presses per keyboard control through a slow key path is a
+            # 15-minute timeout, not a result. Decline up front and let the
+            # control report honestly instead.
+            return False
+        for i in range(max_presses):
+            if i and i % 25 == 0:
+                # A text area consumes Tab instead of moving focus, so the
+                # walk can enter one and never leave (KaOS: focus sat in
+                # 'Notes' for 27 straight presses, and every control after
+                # it in the tab order failed). Ctrl+Tab is Qt's way out,
+                # sent on a counter because reading focus state every press
+                # costs a bus round trip and made the run crawl.
+                escape_focus()
+            else:
+                tap("Tab")
             time.sleep(0.05)
             try:
                 if el.focused:
@@ -374,17 +424,17 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 # where `focus()` was measured not to stick.
                 type_text("torture")
         elif role == "spin button":
-            if seek_focus(el):
+            if seek_focus(el) or _focus_via_api(el):
                 tap("Up")
         elif role == "combo box":
             # A focused QComboBox changes its current index directly on
             # Down (no popup needs to be opened first) -- confirmed on
             # COSMIC to be the simpler, real-focus-only path.
-            if seek_focus(el):
+            if seek_focus(el) or _focus_via_api(el):
                 tap("Down")
                 gui.wait_for_idle(app_pid, timeout=1.5)
         elif role in ("slider", "dial"):
-            if seek_focus(el):
+            if seek_focus(el) or _focus_via_api(el):
                 tap("Up")
                 tap("Right")
         elif role == "scroll bar":
@@ -518,10 +568,17 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                     continue
                 try:
                     x, y, w, h = gui.extents(el)
+                except pyguitest.CapabilityUnsupported:
+                    # No screen coordinates anywhere on this compositor --
+                    # see enumerate_controls. `None` marks "unmeasured", and
+                    # the top-row test below switches to grouping by the
+                    # containing tab list.
+                    y = None
                 except Exception:
                     continue
-                if w <= 0 or h <= 0:
-                    continue
+                else:
+                    if w <= 0 or h <= 0:
+                        continue
                 candidates.append((name, el, y))
                 try:
                     if el.selected:
@@ -542,6 +599,11 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 continue
             try:
                 x, y, w, h = gui.extents(el)
+            except pyguitest.CapabilityUnsupported:
+                # Drivable without a rectangle: actions and Tab-walked
+                # focus, never a coordinate. See enumerate_controls.
+                actable.append((name, role, el))
+                continue
             except Exception:
                 continue
             if clip_bottom is not None and y + h > clip_bottom:
@@ -550,7 +612,20 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 actable.append((name, role, el))
 
         tabs = []
-        if candidates:
+        if candidates and any(y is None for (_n, _e, y) in candidates):
+            # Unmeasured: group by the containing tab list and take the
+            # biggest group. The fixture's main bar carries every page;
+            # a nested bar inside one page carries a handful.
+            groups = {}
+            for (n, e, _y) in candidates:
+                try:
+                    parent = e.parent
+                    key = (parent.role, parent.name, len(parent.children))
+                except Exception:
+                    key = ("?", "?", 0)
+                groups.setdefault(key, []).append((n, e))
+            tabs = max(groups.values(), key=len)
+        elif candidates:
             top_y = min(y for (_n, _e, y) in candidates)
             tabs = [(n, e) for (n, e, y) in candidates if y <= top_y + 5]
         return actable, tabs, current
@@ -607,9 +682,26 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None):
                 failures.append(f"{name} ({role}) -> dialog never appeared")
                 return False
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             tap("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                tap("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{name} ({role}) -> its dialog never closed; "
+                        "every control after this one ran against a modal window"
+                    )
+                    return False
             if name not in ("Open", "Save As") and not gui.wait_until(
                 lambda: status_shows(name), timeout=0.8, interval=0.1
             ):
@@ -778,9 +870,28 @@ def drive_menus(gui, app_frame, app_pid, failures):
                     close_all()
                     return
             gui.focus_window(dialog)
-            gui.wait_window_focus(dialog, timeout=2.0)
+            if not gui.wait_window_focus(dialog, timeout=2.0):
+                # Escape goes wherever focus actually is, so without this the
+                # dialog stays open and blocks everything driven after it.
+                gui.focus_window(dialog)
+                gui.wait_window_focus(dialog, timeout=2.0)
             gui.tap_key("Escape")
-            gui.wait_window_close(dialog, timeout=2.0)
+            if not gui.wait_window_close(dialog, timeout=2.0):
+                # One more Escape: a single press can genuinely miss while a
+                # dialog is still settling.
+                gui.tap_key("Escape")
+                if not gui.wait_window_close(dialog, timeout=2.0):
+                    # Named here, against the control that opened it. These
+                    # dialogs are application-modal, so one that stays open
+                    # makes every later control fail for a reason that has
+                    # nothing to do with those controls.
+                    failures.append(
+                        f"{'/'.join([*path, name])} (menu item) -> its "
+                        "dialog never closed; every later interaction ran "
+                        "against a modal window"
+                    )
+                    close_all()
+                    return
         close_all()
         gui.wait_until_gone(role="menu", within=app_frame, timeout=1.0)
 
@@ -797,18 +908,52 @@ def main():
     try:
         gui = pyguitest.connect(event_delay=0.15, key_delay=0.08)
         window = _wait_app_window(gui, app.pid, timeout=15.0)
+        has_focus = False
         if window is None and app.poll() is not None:
             raise Failure(f"torture-test app exited immediately with {app.returncode}")
         if window is not None:
             gui.activate_window(window)
-            gui.wait_window_focus(window, timeout=5.0)
+            has_focus = gui.wait_window_focus(window, timeout=5.0)
+            if not has_focus:
+                # A real answer, not an exception: the compositor declined to
+                # focus the window, so every key sent from here lands somewhere
+                # else. Said once, loudly, because the alternative is one
+                # "interaction did not report" per keyboard-driven control --
+                # 27 of them on Omarchy, each showing the previous control's
+                # status line, for a single cause. Action clicks still work
+                # without focus, so the run continues rather than aborting.
+                print("WARNING: the window never took keyboard focus; "
+                      "controls that need typing or Tab will not report")
         app_frame = _wait_app_frame(gui, app.pid, timeout=5.0)
         expected = set(expected_controls())
-        items = enumerate_controls(gui, app.pid, expected, app_frame)
+        items, clipped = enumerate_controls(gui, app.pid, expected, app_frame)
         print(f"actable controls found (visible): {len(items)}")
+        if clipped:
+            # Geometry, not a fault: these are expected controls
+            # whose rectangle fell below the status bar, so the
+            # window is clipping the fixture -- usually a screen
+            # smaller than it needs. Said out loud because the
+            # verdict below covers only what was driven.
+            print(f"PARTIAL COVERAGE: {len(clipped)} expected control(s) are "
+                  f"outside the visible window and will not be driven; "
+                  f"a verdict below covers the rest only")
+            print(f"  skipped: {sorted(n for n, _ in clipped)[:12]}")
         print(f"  sample: {sorted({n for n, *_ in items})[:14]}")
+        if not items:
+            # Nothing was enumerated, so nothing below can fail and the
+            # verdict would read as a pass over the whole fixture. Measured
+            # on macOS, where the window had not come up: three lines of
+            # output, "all controls verified", exit 0. Coverage varies
+            # legitimately by screen size, so no floor is imposed beyond
+            # this one -- zero means the fixture was never reached.
+            print("NO CONTROLS FOUND: the fixture published none of the "
+                  "expected controls, so nothing was verified. Check that "
+                  "the application window actually opened and that the "
+                  "accessibility backend can see it.")
+            return 2
         failures = []
-        drive(gui, items, failures, app.pid, expected, app_frame)
+        drive(gui, items, failures, app.pid, expected, app_frame,
+              has_focus=has_focus)
         drive_menus(gui, app_frame, app.pid, failures)
         if failures:
             print(f"STATUS CHECK FAILED: {len(failures)} interaction(s) did not report")
