@@ -17,7 +17,20 @@ echo === unit suite >> %LOG%
 py -u -m pytest pyguitest-tests -q >> %LOG% 2>&1
 echo unit-exit=%ERRORLEVEL% >> %LOG%
 
+rem Sweep any torture-test app left from an earlier run before starting, and
+rem again after. The driver closes the app it launches (windows.py's
+rem close_all), but a run cut short -- a killed Scheduled Task, a timeout --
+rem leaks a detached `pythonw -m torture_test` with no parent to reap it, and
+rem it then sits on the interactive desktop indefinitely. This is the Windows
+rem equivalent of run-box-tests.sh's `pkill -f "[t]orture_test"`; the sweep
+rem lives in win-sweep.ps1 next to this file (inline PowerShell pipes do not
+rem survive cmd's quoting), and is scoped to the torture_test command line so
+rem it never touches an unrelated pythonw/python.
+set SWEEP=powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0win-sweep.ps1"
+
 echo === torture test >> %LOG%
+%SWEEP% 2>nul
 py -u windows.py >> %LOG% 2>&1
 echo driver-exit=%ERRORLEVEL% >> %LOG%
+%SWEEP% 2>nul
 echo === finished %DATE% %TIME% >> %LOG%

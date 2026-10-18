@@ -62,6 +62,9 @@ APP_DIR = os.environ.get("TORTURE_APP_DIR") or str(Path(__file__).resolve().pare
 # several test boxes those live in different virtualenvs.
 APP_PYTHON = os.environ.get("TORTURE_APP_PYTHON") or sys.executable
 
+# --minimal: drive one representative control per role (and one menu item).
+MINIMAL = "--minimal" in sys.argv
+
 # A tuple, not a set, for a deterministic drive order -- see
 # drivers/linux.py's identical comment. No "page tab" (matches
 # nothing here, see module docstring) and no "radio button" tab-list

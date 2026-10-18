@@ -65,6 +65,12 @@ APP_DIR = os.environ.get("TORTURE_APP_DIR") or str(Path(__file__).resolve().pare
 # several test boxes those live in different virtualenvs.
 APP_PYTHON = os.environ.get("TORTURE_APP_PYTHON") or sys.executable
 
+# --minimal: drive one representative control per role (and one menu item)
+# rather than every one. A button proven clickable proves the others are too,
+# so this is the fast core pass -- used for stability campaigns where the full
+# per-control sweep would be redundant. Without it, every control is driven.
+MINIMAL = "--minimal" in sys.argv
+
 # A tuple rather than a set, and "combo box" deliberately last. This is the
 # canonical statement of both reasons; the other drivers in this directory
 # point here rather than repeating them.
@@ -648,17 +654,27 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None,
         return actable, tabs, current
 
     seen = set()
+    driven_roles = set()
 
     def drive_items(current_items):
         ok = True
         for (name, role, el) in current_items:
             if (name, role) in seen:
                 continue
+            # --minimal: one representative per role is enough to prove that
+            # kind of control works -- skip the rest once one has passed. The
+            # role is marked driven only on success, so a representative that
+            # fails lets the next of its kind be tried rather than leaving the
+            # role unproven.
+            if MINIMAL and role in driven_roles:
+                continue
             seen.add((name, role))
             t0 = time.monotonic()
             print(f"  driving {name!r} ({role})...", flush=True)
             try:
-                if not drive_one(name, role, el):
+                if drive_one(name, role, el):
+                    driven_roles.add(role)
+                else:
                     ok = False
             except pyguitest.BackendCallTimeout as exc:
                 failures.append(f"{name} ({role}) -> {exc}")
@@ -912,6 +928,10 @@ def drive_menus(gui, app_frame, app_pid, failures):
         close_all()
         gui.wait_until_gone(role="menu", within=app_frame, timeout=1.0)
 
+    # --minimal: one menu item proves the menu-action path works; driving
+    # every leaf across every submenu is the redundant part this skips.
+    if MINIMAL:
+        leaves = leaves[:1]
     for path, name in leaves:
         try:
             _click_one_leaf(path, name)
