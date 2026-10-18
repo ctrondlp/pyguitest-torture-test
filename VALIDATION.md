@@ -451,6 +451,88 @@ session env taken from the compositor process), `deploy-box.sh`,
 `disable-idle-lock.cmd` (verified on Omarchy, GhostBSD, niri; best-effort
 branches for the rest).
 
+## 2026-10-18: the Wayland drivers share one core, and focus-seeking is a ring walk
+
+The three pointer-free Wayland drivers (`linux.py`, `debian.py`, `cosmic.py`)
+were near-identical ~1000-line copies of one strategy — `debian.py` differed
+from `linux.py` by *docstrings only*, `cosmic.py` by title-vs-pid window
+matching plus a progress print. They are now thin platform files (a
+`Platform` config plus each box's live-verified findings) over a shared
+`drivers/driver_core.py`, which meets the app package's full correctness
+lint standard. `bsd.py` keeps its pointer-driven X11 strategy and imports
+only the shared fixture constants; `macos.py` and `windows.py` are untouched
+and still carry full private copies — migrating their shared constants needs
+their boxes up to validate the changed deployment (both were down today),
+recorded here as open. The `MENU_DIALOG_ITEMS`-must-change-in-six-places
+trap is now a two-place trap (core + each of macos/windows).
+
+**The one behavioral change: `seek_focus` no longer re-walks the Tab ring
+per control.** The old shape pressed Tab up to 60 times *per keyboard
+control*, checking only that control's `focused` state — O(n²) presses per
+page, and the direct cause of the 900 s campaign timeouts seen 2026-10-17 on
+KaOS/niri and Omarchy/Hyprland, where the key path is slow. The new shape
+walks the ring **once per page**: after each press it asks which pending
+target took focus (early-exit scan in enumeration order, which tracks Qt's
+tab order), drives that control right there with the same role key
+sequences, and verifies the same status-bar report. The walk ends when
+nothing pending has taken focus for 60 straight presses or at a per-page
+scaled backstop. Controls the ring never reaches — QScrollBar, QTableView,
+QUndoView are never Tab-reachable at all — go to the same per-role fallbacks
+as before (`Element.focus()`, child action clicks), behind a full 60-press
+confirmation seek. Scroll bars moved out of the focus path entirely (their
+`Increase` action never needed focus). Failure semantics are unchanged: a
+ring-driven control whose report never shows goes back through `drive_one`'s
+fresh-element retry and is recorded against the same failure list.
+
+**The ring's patience is tuned, not guessed — a mid-work flake set it.** A
+tab is switched by an AT-SPI action click, which moves no keyboard focus, so
+when the ring starts pressing Tab on a freshly-shown page focus is wherever
+the previous page left it — often on a now-hidden widget, and the first
+Ctrl+Tab escape (every 25 presses) is what cycles it back into the visible
+page. A first cut set the fruitless limit to 35 (one escape) and shortened
+the post-ring fallback seek to 10 presses on the false premise that a ring
+miss proved a control unreachable. Measured live on the Fedora box, the
+Choosers tab: on one run focus re-entered within 35 and all 12 controls went
+through the ring at ~1 s each; on the very next run it did not, the ring gave
+up with zero hits, and all 12 fell to the shortened fallback at 10–16 s each
+— flaky, because 35 was marginal for getting focus into a page. The fix is
+above: fruitless limit 60 (two escapes, matching the old per-control seek's
+persistence at entering a page) and the fallback seek restored to the full
+60, so a control the ring missed still gets a real seek and the worst case
+(focus never enters a page) degrades to the old behaviour, never to a new
+failure.
+
+**Validated live, same day (the final tuned code):**
+
+- This maintainer's Fedora box (GNOME 51 Wayland, the `linux.py` platform):
+  `all controls verified`, exit 0 — 22 controls via the ring, 6 via the
+  fallback, zero failures, and the Choosers tab driven through the ring
+  (~1–2 s each), confirming the fruitless-limit fix. An earlier run on the
+  pre-fix code had passed too (516 s, same 22/6 split) but only because that
+  run happened not to hit the focus-entry flake.
+- Ubuntu .88 (GNOME 51 Wayland, the `debian.py` platform): the pre-fix code
+  drove the same Choosers controls cleanly via the ring (~0.6–1.4 s each) on
+  its one captured run before the campaign was stopped; the old (per-control
+  seek) driver had passed the full fixture in **773 s** earlier the same day.
+  **A full `.88` campaign on the final tuned code has NOT been run** — the
+  box was rebooted mid-session — so .88 on this code is unverified-pending,
+  recorded here honestly rather than claimed.
+
+**New, unvalidated:** `drivers/sway.py` + `scripts/run-sway-headless.sh` —
+the first wlroots-family driver, for the one pyguitest-validated desktop
+with no torture coverage. The runner boots a private headless sway,
+discovers its sockets, and **refuses to run without `wtype`**: a headless
+sway has no seat, so pyguitest's uinput fallback would attach to the live
+desktop's libinput and type into the user's own session. A bootstrap smoke
+test ran today (sway up, fixture launched inside it, view listed with a pid
+in sway's tree); the driver itself has not — this box has no `wtype`
+(install needs root). Two findings from the smoke are already encoded:
+backend auto-selection inside a nested compositor picks the *outer* desktop
+(measured: `windows()` answered with the GNOME session's windows despite
+`SWAYSOCK` and `XDG_CURRENT_DESKTOP=sway`), so `Platform` grew a `backends`
+override and `sway.py` forces `("sway", "atspi", "input")`; and
+`python -m torture_test` must be launched with the repo as its cwd.
+
 ## Platform matrix
 
 | Platform | Status | Notes |

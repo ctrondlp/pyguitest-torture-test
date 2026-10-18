@@ -20,6 +20,17 @@ from pathlib import Path
 
 import pyguitest
 
+from driver_core import (
+    ALL_ROLES,
+    DIALOG_BUTTONS,
+    MENU_BAR_NAMES,
+    MENU_DIALOG_ITEMS,
+    MENU_ROLES,
+    MENU_SKIP_ITEMS,
+    MENU_SKIP_SUBMENUS,
+    POPUP_ONLY_BUTTONS,
+)
+
 # The repo root: this file lives in <repo>/drivers/, so the app package
 # `torture_test` sits next to it one level up. Overridable for a checkout
 # somewhere else, but needs no configuration in the normal case -- nothing
@@ -37,29 +48,14 @@ APP_PYTHON = os.environ.get("TORTURE_APP_PYTHON") or sys.executable
 MINIMAL = "--minimal" in sys.argv
 
 
-# A tuple, not a set, so the drive order is deterministic: iterating a set is
-# arbitrary and varies per process (str hash randomization), which made the
-# order controls are driven in nondeterministic run-to-run. "combo box" is
-# deliberately LAST because "Toolbar Zoom" (the persistent toolbar combo)
-# changes the app-wide font size when driven, reflowing every control's
-# geometry -- driving it last means its reflow cannot break the control driven
-# immediately after it.
-ACTABLE_ROLES = (
-    "push button", "check box", "radio button", "entry", "text", "spin button",
-    "list", "tree", "table", "calendar", "slider", "dial",
-    "scroll bar", "page tab list", "layered pane", "combo box",
-)
-
-# ACTABLE_ROLES plus "status bar" and "page tab", searched together in one
-# call: enumerate_now() (the tab-walking loop's own per-switch re-scan)
-# used to run three separate find_elements calls -- the actable controls,
-# the status bar for clip_bottom, and the main tab bar's own tabs -- and
-# each one pays for a full walk of the same subtree, the same cost
-# ACTABLE_ROLES alone (16 calls -> 1) was fixed for. No `enabled=True` at
-# the search level here since a status bar's and a tab's own enabled state
-# are beside the point; enabled is checked per-element below instead, for
-# the roles that care about it.
-ALL_ROLES = ACTABLE_ROLES + ("status bar", "page tab")
+# ALL_ROLES and the menu/dialog name sets are shared fixture facts and are
+# imported from driver_core (their rationale lives there) --
+# this driver keeps its own *strategy*, which is pointer-driven X11, a
+# different animal from the pointer-free Wayland family driver_core serves.
+# ALL_ROLES is searched in ONE find_elements call here on purpose:
+# enumerate_now() used to run three separate calls (actable controls, status
+# bar for clip_bottom, the tab bar's tabs) and each paid for a full walk of
+# the same subtree.
 
 
 def _is_read_only(el):
@@ -102,66 +98,6 @@ def _is_showing(el):
         return "SHOWING" in names
     except Exception:
         return False
-
-
-# "Menu Button" is an InstantPopup QToolButton -- opening its menu, not
-# emitting `clicked`, is the real click behavior. Click, dismiss with Escape,
-# and skip the status-bar assertion (no report is coming).
-POPUP_ONLY_BUTTONS = {"Menu Button"}
-
-# "Open", "Save As" and "About TortureTest" each open a real top-level window
-# (QFileDialog / QMessageBox). "Open"/"Save As" only report inside `if path:`,
-# so a cancelled one is a real no-report case, not a tooling gap. "About
-# TortureTest" reports unconditionally once its dialog returns.
-DIALOG_BUTTONS = {"Open", "Save As", "About TortureTest"}
-
-# The menu bar's own top-level items (app.py: _build_menus()), walked by
-# drive_menus() below.
-MENU_BAR_NAMES = ("File", "Edit", "View", "Tools", "Help")
-
-# Clicking these would corrupt the rest of the run rather than exercise it:
-# New Window/Exit change which process is even being driven, the three
-# "Show ..." toggles can hide the status bar or dock every other
-# verification in this script depends on, Dark Theme/Zoom/Reset Demo
-# Controls mutate shared visual state with no defined before/after, and
-# Undo/Redo/Cut/Copy/Paste act on whatever selection happens to exist with
-# no guarantee one does. The menu/submenu containing each is still opened
-# and walked -- only the leaf click itself is skipped.
-MENU_SKIP_ITEMS = {
-    "New Window", "Exit",
-    "Show Status Bar", "Show Tool Bar", "Show Tool Palette",
-    "Undo", "Redo", "Cut", "Copy", "Paste", "Select All",
-    "Reset Demo Controls", "Dark Theme",
-    "Zoom In", "Zoom Out", "Reset Zoom",
-}
-# "Language" switches every control's accessible name to Japanese -- fatal
-# to a driver that matches controls by name for the rest of the run.
-MENU_SKIP_SUBMENUS = {"Language"}
-
-# Leaves that open a real dialog, verified the same way DIALOG_BUTTONS
-# above already is: wait for a new top-level window, dismiss with Escape.
-# "Open…"/"Save As…" are already driven via the toolbar buttons; the
-# longer Slow Dialog presets are skipped to keep one pass bounded.
-MENU_DIALOG_ITEMS = {
-    "Information", "Warning", "Critical", "Question",
-    # Modal, like its QMessageBox siblings above -- it must be listed
-    # here or the driver clicks it, never dismisses it, and the
-    # application-modal dialog then blocks every later menu click.
-    "Error Message",
-    "Get Text", "Get Integer", "Get Item",
-    "Color Picker…", "Font Picker…", "File Dialog…",
-    "Progress Dialog…", "Custom Dialog…", "Wizard…", "MDI Workspace…",
-    # The whole Slow Dialog submenu, not just the first entry: each one
-    # opens a modal dialog after its own delay (`QTimer.singleShot`), and
-    # an undismissed one surfaces in the middle of a later leaf and blocks
-    # it. `_wait_new_app_window`'s 15 s budget covers the 10 s case.
-    "1 second", "3 seconds", "5 seconds", "10 seconds", "Custom…",
-    # Opens a modal "Control Inventory" window that stays up until closed.
-    "Dump Controls",
-    "About TortureTest…", "About Qt…",
-}
-
-MENU_ROLES = ("menu", "menu item", "check menu item", "radio menu item")
 
 
 class Failure(Exception):

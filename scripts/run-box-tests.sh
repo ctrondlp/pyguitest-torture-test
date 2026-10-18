@@ -2,7 +2,9 @@
 # Run the pyguitest unit suite + one torture-test driver from /tmp/tt-run.
 # Usage: run-box-tests.sh <driver.py> [session-type]
 # Expects /tmp/tt-run to already hold pyguitest/, pyguitest-tests/,
-# torture_test/, tests/test_app.py and the driver.
+# torture_test/, tests/test_app.py, the driver, and driver_core.py (the
+# shared module the Linux-family drivers and bsd.py import, which must sit
+# flat next to the driver script).
 set -u
 DRV=${1:?driver}
 PY=$HOME/code/.venv/bin/python

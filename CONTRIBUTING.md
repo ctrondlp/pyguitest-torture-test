@@ -114,7 +114,9 @@ the inventory. In order:
 missed.
 
 **If the control opens a modal dialog, it must also be added to
-`MENU_DIALOG_ITEMS` in every driver.** Only the entries listed there get the
+`MENU_DIALOG_ITEMS` — once in `drivers/driver_core.py` (which serves the
+Wayland drivers and `bsd.py`), and again in `macos.py` and `windows.py`,
+which still carry their own copies.** Only the entries listed there get the
 wait-for-window / focus / Escape / wait-for-close treatment. Adding a modal
 dialog without listing it killed a whole Windows run mid-walk and left the
 app stranded on the desktop: the driver clicked the item, never dismissed
@@ -130,9 +132,15 @@ That is expected; note it in the pull request rather than quietly leaving
 ## Working on a driver
 
 The drivers are standalone scripts copied to a test box and run there — not
-library code, and not installed with the app. They are also, deliberately,
-near-duplicates of one another: each is a long linear drive sequence whose
-value is being readable end to end on the platform it documents.
+library code, and not installed with the app. The pointer-free Wayland
+family (`linux.py`, `debian.py`, `cosmic.py`) shares its whole strategy
+through `drivers/driver_core.py` — those drivers are now a platform config
+plus the box's live-verified findings, and `driver_core.py` must be
+deployed next to them (the scripts under `scripts/` do). `bsd.py` keeps its
+own pointer-driven X11 strategy and imports only the shared fixture
+constants; `macos.py` and `windows.py` still carry full private copies,
+each a long linear drive sequence readable end to end on the platform it
+documents.
 
 - **Never hard-code a path.** Each driver derives the repository root from
   its own location; `TORTURE_APP_DIR` and `TORTURE_APP_PYTHON` are the

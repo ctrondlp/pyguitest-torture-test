@@ -224,10 +224,12 @@ reach, such as a `QTextEdit` that publishes only `Set Focus`.
 
 ## Gotchas that cost real time
 
-- **A new modal dialog must be added to `MENU_DIALOG_ITEMS` in every
-  driver.** Each driver keeps a set naming the menu entries that open a
-  dialog, and only those get the
+- **A new modal dialog must be added to `MENU_DIALOG_ITEMS`.** The set
+  names the menu entries that open a dialog, and only those get the
   wait-for-window / `focus_window` / Escape / wait-for-close treatment.
+  One copy in `drivers/driver_core.py` now serves the Wayland family and
+  `bsd.py` (which imports it); **`macos.py` and `windows.py` still carry
+  their own copies and must be updated by hand.**
   Adding `QErrorMessage` to the Tools menu without listing it killed the
   Windows run mid-walk (`STATUS_CONTROL_C_EXIT`, app left stranded on the
   desktop): the driver clicked the item, never dismissed it, and an
