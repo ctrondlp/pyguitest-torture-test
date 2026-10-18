@@ -30,6 +30,12 @@ APP_DIR = os.environ.get("TORTURE_APP_DIR") or str(Path(__file__).resolve().pare
 # several test boxes those live in different virtualenvs.
 APP_PYTHON = os.environ.get("TORTURE_APP_PYTHON") or sys.executable
 
+# --minimal: drive one representative control per role (and one menu item)
+# rather than every one. A button proven clickable proves the others are too,
+# so this is the fast core pass -- used for stability campaigns where the full
+# per-control sweep would be redundant. Without it, every control is driven.
+MINIMAL = "--minimal" in sys.argv
+
 
 # A tuple, not a set, so the drive order is deterministic: iterating a set is
 # arbitrary and varies per process (str hash randomization), which made the
@@ -477,6 +483,7 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
         return actable, tabs, current
 
     seen = set()
+    driven_roles = set()
 
     def drive_items(current_items):
         # Every item is attempted regardless of an earlier miss in this same
@@ -496,9 +503,16 @@ def drive(gui, items, failures, app_pid, expected, app_frame=None, window=None):
         for (name, role, x, y, w, h) in current_items:
             if (name, role) in seen:
                 continue
+            # --minimal: one representative per role proves that kind of
+            # control works; mark driven only on success so a failed
+            # representative lets the next of its kind be tried.
+            if MINIMAL and role in driven_roles:
+                continue
             seen.add((name, role))
             try:
-                if not drive_one(name, role, x, y, w, h):
+                if drive_one(name, role, x, y, w, h):
+                    driven_roles.add(role)
+                else:
                     ok = False
             except pyguitest.BackendCallTimeout as exc:
                 failures.append(f"{name} ({role}) -> {exc}")
@@ -814,6 +828,9 @@ def drive_menus(gui, app_frame, app_pid, failures):
         close_all()
         gui.wait_until_gone(role="menu", within=app_frame, timeout=1.0)
 
+    # --minimal: one menu item proves the menu-action path works.
+    if MINIMAL:
+        leaves = leaves[:1]
     for path, name in leaves:
         # A call that genuinely hangs inside pyguitest's own atspi backend
         # now raises BackendCallTimeout there rather than blocking forever

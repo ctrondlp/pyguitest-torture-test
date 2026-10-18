@@ -38,6 +38,9 @@ APP_DIR = os.environ.get("TORTURE_APP_DIR") or str(Path(__file__).resolve().pare
 # several test boxes those live in different virtualenvs.
 APP_PYTHON = os.environ.get("TORTURE_APP_PYTHON") or sys.executable
 
+# --minimal: drive one representative control per role (and one menu item).
+MINIMAL = "--minimal" in sys.argv
+
 
 def _app_python():
     """`pythonw.exe`, not `python.exe` -- a console-subsystem interpreter
@@ -351,19 +354,27 @@ def drive(gui, items, failures, app_pid, expected):
         return actable, tabs, current
 
     seen = set()
+    driven_roles = set()
 
     def drive_items(current_items):
         ok = True
         for (name, role, el) in current_items:
             if (name, role) in seen:
                 continue
+            if MINIMAL and role in driven_roles:
+                continue
             seen.add((name, role))
+            t0 = time.monotonic()
+            print(f"  driving {name!r} ({role})...", flush=True)
             try:
-                if not drive_one(name, role, el):
+                if drive_one(name, role, el):
+                    driven_roles.add(role)
+                else:
                     ok = False
             except pyguitest.BackendCallTimeout as exc:
                 failures.append(f"{name} ({role}) -> {exc}")
                 ok = False
+            print(f"    ...done in {time.monotonic() - t0:.2f}s", flush=True)
         return ok
 
     def status_shows(name):
@@ -442,17 +453,23 @@ def drive(gui, items, failures, app_pid, expected):
         current = None
         failures.append(f"enumerate_now() (initial) -> {exc}")
     clicked_tabs = {current} if current else set()
-    for _ in range(40):
+    for i in range(40):
+        t0 = time.monotonic()
+        print(f"tab scan {i}: enumerate_now()...", flush=True)
         try:
             _, tabs, _ = enumerate_now()
         except pyguitest.BackendCallTimeout as exc:
+            print(f"  -> BackendCallTimeout after {time.monotonic() - t0:.2f}s: {exc}",
+                  flush=True)
             failures.append(f"enumerate_now() (tab scan) -> {exc}")
             break
+        print(f"  -> {len(tabs)} tabs in {time.monotonic() - t0:.2f}s", flush=True)
         nxt = next((t for t in tabs if t[0] not in clicked_tabs), None)
         if nxt is None:
             break
         tname, tel = nxt
         clicked_tabs.add(tname)
+        print(f"  clicking tab {tname!r}...", flush=True)
         point(tel)
         click()
         gui.wait_for_idle(app_pid, timeout=1.5)
@@ -601,6 +618,8 @@ def drive_menus(gui, app_pid, failures):
         close_all()
         gui.wait_until_gone(role="menu", timeout=1.0)
 
+    if MINIMAL:
+        leaves = leaves[:1]
     for path, name in leaves:
         try:
             _click_one_leaf(path, name)

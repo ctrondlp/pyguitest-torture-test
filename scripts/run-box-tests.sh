@@ -39,7 +39,7 @@ session_env() { # $1 = pid -> one VAR=VALUE per line
 }
 
 for comp in gnome-shell cosmic-comp Hyprland niri sway kwin_wayland marco \
-            xfwm4 mutter plasmashell kwin_x11 mate-session; do
+            xfwm4 mutter plasmashell kwin_x11 mate-session cinnamon muffin; do
   cpid=$(pgrep -u "$U" -x "$comp" 2>/dev/null | head -1)
   [ -n "$cpid" ] || continue
   env_dump=$(session_env "$cpid")
@@ -69,6 +69,20 @@ if [ -z "${SWAYSOCK:-}" ]; then
     [ -S "$s" ] && export SWAYSOCK="$s" && break
   done
 fi
+# Hyprland generates a per-session instance signature and hands it only to the
+# clients it spawns, so -- exactly like niri's and sway's IPC sockets above --
+# the compositor's own environment does not carry it and an ssh shell cannot
+# inherit it. Without HYPRLAND_INSTANCE_SIGNATURE pyguitest selects the generic
+# `wlroots` backend instead of the dedicated `hyprland` one, whose window
+# activation does not reliably grab keyboard focus; `seek_focus` then exhausts
+# its budget and every keyboard-driven control fails, each run grinding to the
+# 900 s cap. Confirmed live on Omarchy (2026-10-17): with it set the composite
+# becomes hyprland+... and typing/Tab land; without it, 11 controls miss. The
+# signature is the name of the live directory under $XDG_RUNTIME_DIR/hypr.
+if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then
+  sig=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)
+  [ -n "$sig" ] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+fi
 
 # Fallbacks for a box with no readable compositor environ (FreeBSD has no
 # /proc/<pid>/environ at all).
@@ -83,6 +97,13 @@ export PYTHONPATH=/tmp/tt-run
 export TORTURE_APP_DIR=/tmp/tt-run
 export TORTURE_APP_PYTHON=$PY
 unset NO_AT_BRIDGE
+# A box that could not apt-install a Qt runtime dependency (no sudo) may have
+# it extracted under ~/xcbcursor from a user-level `apt-get download` + `dpkg
+# -x`; PySide6's xcb platform plugin needs libxcb-cursor0 from 6.5 on. Adding
+# it here is harmless where the directory does not exist.
+for d in "$HOME"/xcbcursor/usr/lib/*/; do
+  [ -d "$d" ] && export LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
 cd /tmp/tt-run || exit 1
 
 echo "== interpreter: $($PY -V 2>&1), pyguitest $($PY -c 'import pyguitest;print(pyguitest.__version__)')"
@@ -99,13 +120,29 @@ $PY -m pytest pyguitest-tests -q \
   --ignore=pyguitest-tests/test_api_docs.py \
   --ignore=pyguitest-tests/test_style.py 2>&1 | tail -4
 
-echo "== torture test ($DRV)"
-pkill -f "[t]orture_test" 2>/dev/null
-SECONDS=0
-timeout 900 "$PY" "$DRV" >driver_0171.log 2>&1
-echo "exit=$? after ${SECONDS}s"
-grep -n -E "STATUS CHECK|all controls verified|WARNING|NO CONTROLS|PARTIAL COVERAGE|Traceback|Segmentation" driver_0171.log
-echo "-- tail:"
-tail -22 driver_0171.log | cut -c1-170
-pkill -f "[t]orture_test" 2>/dev/null
+# RUNS: how many back-to-back torture runs to do (default 1). A multi-run
+# campaign checks stability -- same verdict every time, or flaky -- rather
+# than trusting a single pass. Each run gets a fresh app (the driver launches
+# and tears down its own), and its own log driver_run<N>.log.
+RUNS=${RUNS:-${2:-1}}
+echo "== torture test ($DRV), $RUNS run(s)"
+summary=""
+for run in $(seq 1 "$RUNS"); do
+  pkill -f "[t]orture_test" 2>/dev/null
+  log="driver_run${run}.log"
+  SECONDS=0
+  timeout 900 "$PY" "$DRV" ${TORTURE_DRIVER_ARGS:-} >"$log" 2>&1
+  code=$?
+  dur=$SECONDS
+  verdict=$(grep -m1 -E "all controls verified|NO CONTROLS|PARTIAL COVERAGE|STATUS CHECK FAILED" "$log" | sed 's/^[0-9]*://')
+  fails=$(grep -cE "^\s+- " "$log")
+  echo "-- run $run: exit=$code after ${dur}s | ${verdict:-(no verdict)} | $fails failure line(s)"
+  grep -nE "STATUS CHECK FAILED|Traceback|Segmentation|NO CONTROLS" "$log" | head -3
+  grep -E "^\s+- " "$log" | head -8
+  summary="${summary}run ${run}: exit=${code} ${dur}s ${verdict}
+"
+  pkill -f "[t]orture_test" 2>/dev/null
+done
+echo "== campaign summary ($DRV) =="
+printf '%s' "$summary"
 pgrep -f "[t]orture_test" >/dev/null || echo "app-closed"
