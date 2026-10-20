@@ -545,7 +545,44 @@ override and `sway.py` forces `("sway", "atspi", "input")`; and
 | Omarchy / Hyprland (Arch) | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, exit 0, 740 s. The long-standing "Hyprland grants no window keyboard focus" block was **the session being locked**: Omarchy's shell locks after 300 s idle through its own PAM-backed `ext-session-lock`, and Hyprland refuses `focusWindow` outright while a lock is up, while every dispatch still replies `ok`, `hyprctl layers` lists no lock surface and `loginctl` says `LockedHint=no`. Unlocked at the console + `omarchy-toggle-idle stay-awake`, the same tree passed first time. Ask the shell before debugging focus: `OMARCHY_PATH=/usr/share/omarchy omarchy-shell lock isLocked` | Dedicated test box (VBox); keep it unlocked and awake — `scripts/disable-idle-lock.sh`. Pointer injection is still a *permission* away (`/dev/uinput` root-only, no ACL), not needed for a pass |
 | KaOS / niri | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, the first full widget-level run ever on niri, closing the last compositor gap in the matrix. Getting there took one provisioning step (`gtk3`, root — KaOS ships no GTK and dogtail's `utils.py` requires the Gtk-3.0 typelib at import), one package repair (`pip install pyside6` into `~/tt-venv`: KaOS had `pyside6 6.12.0` against `qt6-base 6.11.2`, so system PySide6 could not even import QtCore; the wheel bundles its own Qt), and `NIRI_SOCKET` exported from the socket file (niri does not carry it in its own environment, and without it the niri backend never joins the composite). niri reports no position for a tiled window (`tile_pos_in_workspace_view` null even on screen), so there are no screen coordinates there at all — pyguitest now refuses `extents()` with a typed `CapabilityUnsupported` instead of returning `None`, and the drivers keep such controls and drive them through actions and real-focus keys, which need no coordinates | Dedicated test box (VM). `scripts/run-box-tests.sh` handles the env; the box's venv is `~/tt-venv` |
 | Ubuntu 26.10 (GNOME Wayland) | **Fully clean — zero known bugs** (2026-10-15, pyguitest 0.17.1) — `all controls verified`, exit 0, 873 s, on a box provisioned from bare that same day: no pip, no ensurepip, no virtualenv, no curl, no gcc, so the venv was built `--system-site-packages --without-pip` and pip bootstrapped with urllib; PySide6/dogtail/pytest from PyPI on top of the system `gi`. Needed beyond that: the pyguitest GNOME Shell extension (user-level install + a log out/in — Wayland cannot reload the Shell), `toolkit-accessibility` true (was false, same as Debian), and uinput (`python3-evdev` via apt + an ACL on `/dev/uinput`; pip cannot build evdev there and libei answered `BackendUnavailable` on this session). All of it is `~/setup-pyguitest-ubuntu.sh` and `~/fix-pyguitest-ubuntu.sh` on the box, both idempotent. Unit suite: 2243 passed there | New (eighth) box, `ssh paulsden@192.168.1.88` |
-| Windows | **Fully clean — zero known bugs** (re-verified 2026-10-15 on pyguitest 0.17.1 via a Scheduled Task into session 1: `all controls verified`, driver-exit 0, 3 controls clipped; re-verified 2026-10-13 after the restructure, then again after `QUndoView`/`QErrorMessage` — 21/21 self-test, `all controls verified`, `EXIT=0`, empty stderr, nothing leaked; the intermediate failure and its cause are below) — brand-new driver, `all controls verified` on 2 consecutive full runs on the first attempt | Dedicated test box; must run via a Scheduled Task bound to the interactive session, not plain SSH — see below |
+| Windows 11 | **Fully clean — zero known bugs** (re-verified 2026-10-15 on pyguitest 0.17.1 via a Scheduled Task into session 1: `all controls verified`, driver-exit 0, 3 controls clipped; re-verified 2026-10-13 after the restructure, then again after `QUndoView`/`QErrorMessage` — 21/21 self-test, `all controls verified`, `EXIT=0`, empty stderr, nothing leaked; the intermediate failure and its cause are below) — brand-new driver, `all controls verified` on 2 consecutive full runs on the first attempt | Dedicated test box; must run via a Scheduled Task bound to the interactive session, not plain SSH — see below |
+| Windows 10 (22H2, build 19045) | **Fully clean — zero known bugs** (2026-10-19, pyguitest with the drag/region fixes) — 23/23 self-test, `all controls verified`, `EXIT=0`, 17 actable controls visible, nothing leaked. First torture run on Windows 10, same `uia`+`win32`/Scheduled-Task path as Windows 11 (here the composite was `win32` alone). Needed only Python installed from scratch (python.org 3.12.10 — winget is absent over SSH) and `pip install PySide6 comtypes` | New (tenth) box, `ssh paulsden@192.168.1.89` (user `paulsden`, VirtualBox guest "winny"). A mid-install SSH drop left a null-byte-corrupted PySide6 once — `pip install --force-reinstall --no-cache-dir` fixed it |
+| Fedora 19 (GNOME 3.8, Xorg, 2013) | **Torture test impossible — not a pyguitest limit** (2026-10-19) — the app itself cannot run: no PySide6 wheel exists for glibc 2.17 (Qt 6's floor is glibc 2.28) and no GI/AT-SPI bindings for a modern interpreter. pyguitest *itself* was validated here separately (drag/region fixes green, 71 unit tests, recorder record→replay round trip on gedit) on a portable CPython 3.12 — see pyguitest's own `docs/validation.md`. Recorded here only so the gap is deliberate, not an untried box | Legacy box, `ssh paulsden@192.168.1.91` (needs an ECDSA key — its sshd 6.2 predates ed25519) |
+
+## 2026-10-19: Windows 10 added, and Fedora 19's hard floor
+
+Two new boxes came online while validating a pair of pyguitest fixes (`drag()`
+releasing its button even when the glide raises, and `check_region()` covering
+fractional regions instead of truncating them — both live in pyguitest's own
+`docs/validation.md`). The torture app itself was run where it could run.
+
+**Windows 10 (22H2, build 19045) — fully clean, first attempt.** The box had
+no Python at all; python.org 3.12.10 installed quietly over SSH (winget does
+not exist in an SSH session), then `PySide6` and `comtypes`. The driver ran
+through the same Scheduled-Task-into-session-1 path as Windows 11 — a plain
+SSH session is Session 0 and sees no desktop — and reported 23/23 self-test,
+`all controls verified`, `EXIT=0`, 17 actable controls visible, with no
+process or window left behind. The composite here was `win32` alone (Windows
+11's is `uia`+`win32`), which is the honest difference between the two boxes,
+not a failure. One operational scar worth keeping: a mid-install SSH drop
+left PySide6 half-written and importing it failed with "source code string
+cannot contain null bytes" — a corrupted install masquerading as a code bug;
+`pip install --force-reinstall --no-cache-dir` was the fix, and a
+file-based import probe is what told a real `ModuleNotFoundError` apart from
+a corrupt one over a connection that mangles inline Python.
+
+**Fedora 19 (2013) — the app cannot run there, and that is the finding.**
+This is the oldest system in the fleet: GNOME 3.8 on Xorg 1.14, glibc 2.17,
+system Python 3.3. The torture fixture is PySide6/Qt 6, and Qt 6's own glibc
+floor is 2.28 — pip finds *no* wheel, and there are no GI/AT-SPI bindings for
+a modern interpreter on the box either, so element automation is out
+regardless. The torture test is therefore impossible here, and that is a
+property of a thirteen-year-old userland, not of pyguitest. pyguitest itself
+was validated on the box separately on a portable CPython 3.12 (the drag and
+region fixes, 71 unit tests, and a full recorder record→generate→replay round
+trip against gedit on the live desktop), recorded in pyguitest's own
+`docs/validation.md`. The row is in the matrix above so the gap reads as
+deliberate rather than as a box nobody tried.
 
 ## 2026-10-11 session
 
