@@ -1,10 +1,13 @@
 # Validation status
 
 Tracks the cross-platform validation effort: driving this app through
-pyguitest's own API (never raw XTEST/XRECORD — see AGENTS.md) on all 5
-target platforms, one at a time, fixing real bugs as they're found. Prior
-history before 2026-10-11 lived in a private, non-repo file
-(`~/pyguitest-validation-state.md`); from 2026-10-11 on it lives here.
+pyguitest's own API (never raw XTEST/XRECORD — see AGENTS.md) across the
+target fleet, one platform at a time, fixing real bugs as they're found. The
+[Platform matrix](#platform-matrix) below is the current per-platform
+status — now well past the original five targets — and the dated sections
+after it are the per-run history behind it. Prior history before 2026-10-11
+lived in a private, non-repo file (`~/pyguitest-validation-state.md`); from
+2026-10-11 on it lives here.
 
 ## Scale of the fixture
 
