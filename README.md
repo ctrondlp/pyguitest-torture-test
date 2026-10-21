@@ -2,7 +2,7 @@
 
 [![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Platforms driven clean](https://img.shields.io/badge/platforms%20driven%20clean-4%20of%206-yellow.svg)](VALIDATION.md)
+[![Platforms driven clean](https://img.shields.io/badge/platforms%20driven%20clean-8-brightgreen.svg)](VALIDATION.md)
 
 A desktop application stuffed with (nearly) every Qt control, built to be the
 worst case for [pyguitest](https://github.com/ctrondlp/pyguitest) — and for any
@@ -28,20 +28,19 @@ themes, resizes and platform changes.
 | Menu-bar and toolbar actions | **95** |
 | Tab pages | **9** |
 | Uniquely-named controls driven and verified | **105** |
-| Platforms driven clean, zero failures | **4 of 6** |
+| Platforms driven clean, zero known bugs | **8** |
 
 The last two rows are the ones that matter: every one of the 105 named
 controls is individually driven *and* confirmed landed by reading the status
-bar — plus the whole menu bar. Clean as of 2026-10-14 on FreeBSD/GhostBSD,
-Pop!_OS/COSMIC, Debian and Windows. Neither of the other two is a pyguitest
-defect. macOS is one control short — `Undo History`, whose rows do not move
-the undo stack through the AX API, a gap in this repo's own driver. Omarchy/
-Hyprland has no known bug in either project: Hyprland hands keyboard focus to
-a layer surface and will not give it to a window, which pyguitest reports
-accurately. The run there did find a real pyguitest bug — every window
-control had become a silent no-op after Hyprland changed its dispatch syntax
-— and that is fixed. See [VALIDATION.md](VALIDATION.md) for the per-platform
-record, including the bugs each run found in pyguitest itself.
+bar — plus the whole menu bar. That clean drive holds across the Linux, BSD
+and Windows fleet; the one dedicated target short of it is macOS, by a single
+control (`Undo History`, whose rows do not move the undo stack through the AX
+API — a gap in this repo's own driver, not a pyguitest defect).
+
+[VALIDATION.md](VALIDATION.md) is the source of truth: it carries the current
+per-platform matrix — which platforms are clean, on what, when — and the real
+bugs each run turned up in pyguitest itself. This paragraph deliberately does
+not restate the matrix, so the two cannot drift apart as the fleet grows.
 
 ## Requirements
 
