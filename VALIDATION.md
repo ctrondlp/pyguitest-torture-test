@@ -551,6 +551,71 @@ override and `sway.py` forces `("sway", "atspi", "input")`; and
 | Windows 11 | **Fully clean — zero known bugs** (re-verified 2026-10-15 on pyguitest 0.17.1 via a Scheduled Task into session 1: `all controls verified`, driver-exit 0, 3 controls clipped; re-verified 2026-10-13 after the restructure, then again after `QUndoView`/`QErrorMessage` — 21/21 self-test, `all controls verified`, `EXIT=0`, empty stderr, nothing leaked; the intermediate failure and its cause are below) — brand-new driver, `all controls verified` on 2 consecutive full runs on the first attempt | Dedicated test box; must run via a Scheduled Task bound to the interactive session, not plain SSH — see below |
 | Windows 10 (22H2, build 19045) | **Fully clean — zero known bugs** (2026-10-19, pyguitest with the drag/region fixes) — 23/23 self-test, `all controls verified`, `EXIT=0`, 17 actable controls visible, nothing leaked. First torture run on Windows 10, same `uia`+`win32`/Scheduled-Task path as Windows 11 (here the composite was `win32` alone). Needed only Python installed from scratch (python.org 3.12.10 — winget is absent over SSH) and `pip install PySide6 comtypes` | New (tenth) box, `ssh paulsden@192.168.1.89` (user `paulsden`, VirtualBox guest "winny"). A mid-install SSH drop left a null-byte-corrupted PySide6 once — `pip install --force-reinstall --no-cache-dir` fixed it |
 | Fedora 19 (GNOME 3.8, Xorg, 2013) | **Torture test impossible — not a pyguitest limit** (2026-10-19) — the app itself cannot run: no PySide6 wheel exists for glibc 2.17 (Qt 6's floor is glibc 2.28) and no GI/AT-SPI bindings for a modern interpreter. pyguitest *itself* was validated here separately (drag/region fixes green, 71 unit tests, recorder record→replay round trip on gedit) on a portable CPython 3.12 — see pyguitest's own `docs/validation.md`. Recorded here only so the gap is deliberate, not an untried box | Legacy box, `ssh paulsden@192.168.1.91` (needs an ECDSA key — its sshd 6.2 predates ed25519) |
+| Fedora 44 KDE (Plasma 6, Wayland) | **Fully clean — zero known bugs** (2026-10-21, pyguitest 0.19.0) — `all controls verified`, exit 0 on 2 consecutive runs (394 s, 407 s), 3 controls clipped by screen size; fleet's first KDE torture driver. Composite is `kdotool` windows + atspi + uinput input (doctor: `compositor kwin (KDE)`, `input uinput (in-process)`) — input is via uinput, not the eiinput portal (KDE's RemoteDesktop consent dialog can't be answered unattended). `Window.pid` is absent (kdotool has no pid lookup), so window matching is by title, like COSMIC. A first run showed 5 failures (trees/tables/sliders reporting stale statuses) that did **not** recur — a terminal window flashing up and stealing keyboard focus mid-run, not a driver bug | Dedicated test box, `ssh paulsden@192.168.1.101`. Needs `kdotool` + `python3-evdev` + a writable `/dev/uinput` — `~/setup-pyguitest-kde.sh` on the box does all three |
+| sway (wlroots, headless) | **Torture test not applicable — harness limit, not a pyguitest bug** (2026-10-21) — a headless `sway` (`WLR_BACKENDS=headless`, no input devices) has a **seatless** `seat0` (`capabilities: 0`, no keyboard), so no surface ever receives `wl_keyboard` focus (`0x0 is focused`; Qt logs `wl_keyboard.leave ... most likely a compositor bug`) and wtype keystrokes land nowhere — only AT-SPI-action controls (buttons/tabs/menus) can be driven, the keyboard-focus half cannot. This is purely the headless harness: a real sway session has a keyboard on its seat. The identical wlroots-family driver strategy (AT-SPI actions + Tab-walked keyboard, `drivers/cosmic.py`) is already proven clean on **Omarchy/Hyprland and KaOS/niri** with real seats, so this adds no real-world coverage. The `drivers/sway.py` + `scripts/run-sway-headless.sh` fixes (correct `windows` backend name; all three XDG desktop-name vars exported) stand as correctness fixes for a real sway session | Runs locally, no box — `scripts/run-sway-headless.sh` (needs `sway` + `wtype`) |
+
+## 2026-10-21: KDE torture driver added (clean); headless-sway torture ruled not applicable
+
+Two wlroots-and-KDE items, both off the same shared driver core
+(`drivers/driver_core.py`) that made each driver a thin identity file rather
+than another ~1000-line copy.
+
+**KDE — new, clean, the session's real win.** `drivers/kde.py` is the fleet's
+first KDE torture driver: a thin `Platform(name="kde-plasma-wayland",
+windows_by_pid=False)` over the shared pointer-free strategy. `windows_by_pid`
+is off because the `kdotool` window backend declares no `WINDOW_PID`
+capability (window ids are KWin UUIDs, no pid lookup), so window matching is
+by title, exactly as on COSMIC; AT-SPI's own `Element.pid` is unaffected, so
+`app_frame`-scoped element lookups still filter by pid. Input is the `uinput`
+rung, not `eiinput`/libei: KDE's RemoteDesktop portal raises a per-session
+consent dialog an unattended run cannot click, while uinput needs only a
+writable `/dev/uinput`. Provisioning on `ssh paulsden@192.168.1.101` is
+`~/setup-pyguitest-kde.sh` (installs `kdotool` + `python3-evdev`, adds the
+fleet-standard input-group + udev rule, and an immediate ACL so the running
+session works without re-login).
+
+Result — two back-to-back runs on pyguitest 0.19.0, unit suite 2330 passed /
+9 skipped / 1493 subtests first:
+
+    == doctor: session xwayland compositor kwin (KDE) input uinput (in-process)
+    -- run 1: exit=0 after 394s | PARTIAL COVERAGE: 3 expected control(s) are outside the visible window | 0 failure line(s)
+    -- run 2: exit=0 after 407s | PARTIAL COVERAGE: 3 expected control(s) are outside the visible window | 0 failure line(s)
+
+The 3 clipped controls are the usual below-the-status-bar ones at this
+resolution. An earlier first attempt reported 5 failures (Project/Model Tree,
+Data Grid, Volume/Stepped sliders, each showing another control's stale
+status) that vanished on both campaign runs — a terminal window flashed up and
+stole keyboard focus mid-run, confirmed by the maintainer watching the screen,
+not a driver fault.
+
+**sway (headless) — ruled not applicable.** With `wtype` finally installed
+locally, `scripts/run-sway-headless.sh` was exercised and exposed a real but
+non-code limit. First it surfaced two actual bugs in the driver/runner, now
+fixed: `drivers/sway.py` named a backend `"sway"` that pyguitest does not
+register (the window tier is the single `windows` factory that selects
+Sway/Hyprland/niri/KWin from the detected compositor), so `connect()` raised
+`BackendUnavailable: unknown backend 'sway'`; and the runner exported only
+`XDG_CURRENT_DESKTOP`, but pyguitest identifies the compositor from a haystack
+of `XDG_CURRENT_DESKTOP` + `XDG_SESSION_DESKTOP` + `DESKTOP_SESSION`, so an
+inherited `gnome` in either of the other two would out-rank the wlroots hints.
+Both fixed; the driver then connected (`sway+atspi+input:wtype`) and drove
+every AT-SPI-action control cleanly.
+
+But the keyboard-focus half cannot pass under a headless sway, and not for any
+reason in this project. `swaymsg -t get_seats` on a `WLR_BACKENDS=headless`
+sway with no input devices shows `seat0` with `capabilities: 0` and
+`devices: []` — there is no keyboard on the seat, so the compositor never
+sends `wl_keyboard.enter` to any surface (`0x0 is focused`; Qt logs
+`Ignoring unexpected wl_keyboard.leave event ... most likely a compositor
+bug`), and wtype's keystrokes route nowhere. A real sway session has a
+keyboard on its seat and does not hit this. The same wlroots-family
+interaction strategy (`drivers/cosmic.py`: AT-SPI action clicks + Tab-walked
+real-focus keyboard) already reached `all controls verified` on two real
+wlroots compositors with real seats — Omarchy/Hyprland and KaOS/niri — so a
+headless-sway torture pass would duplicate coverage real users already have
+while testing an environment none of them run. The driver/runner fixes are
+kept as correctness fixes; the full headless run is recorded here as not
+applicable rather than as a failure.
 
 ## 2026-10-19: Windows 10 added, and Fedora 19's hard floor
 
