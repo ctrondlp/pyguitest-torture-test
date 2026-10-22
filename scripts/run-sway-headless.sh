@@ -51,7 +51,13 @@ if [ -z "${NEW:-}" ]; then
 fi
 export WAYLAND_DISPLAY=$(basename "$NEW")
 export XDG_SESSION_TYPE=wayland
+# All three desktop-name variables, not just XDG_CURRENT_DESKTOP: pyguitest
+# identifies the compositor from a haystack of all of them, and "gnome" in
+# an inherited XDG_SESSION_DESKTOP/DESKTOP_SESSION outranks the wlroots
+# hints -- the outer desktop would win window-backend selection again.
 export XDG_CURRENT_DESKTOP=sway
+export XDG_SESSION_DESKTOP=sway
+export DESKTOP_SESSION=sway
 for _ in $(seq 1 50); do
   SOCK=$(ls -t "$RUNDIR"/sway-ipc.*.sock 2>/dev/null | head -1)
   [ -S "${SOCK:-/nonexistent}" ] && break

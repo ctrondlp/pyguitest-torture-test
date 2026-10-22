@@ -25,6 +25,7 @@ What is known going in, and what is not:
   expected to hold -- unverified live, which is half of why this driver is
   marked unvalidated.
 """
+
 from __future__ import annotations
 
 import sys
@@ -36,9 +37,16 @@ from driver_core import Platform, run
 # selection to the outer desktop (gui.windows() answered with the GNOME
 # session's windows), and the sequence form fails loudly if the sway IPC
 # socket is missing instead of quietly substituting another backend.
+# "windows" is the registered name of pyguitest's whole window tier -- one
+# factory that picks Sway/Hyprland/niri/KWin/... from the detected
+# compositor, so there is no "sway" spelling to name here. That selection
+# reads XDG_CURRENT_DESKTOP *and* XDG_SESSION_DESKTOP/DESKTOP_SESSION, and
+# "gnome" in any of them outranks the wlroots hints -- which is the actual
+# mechanism of the nested-selection failure above, and why the runner must
+# override all three, not just XDG_CURRENT_DESKTOP.
 # "input" is pyguitest's input factory, which on a wlroots session with
 # wtype installed resolves to the virtual-keyboard route this driver needs.
-PLATFORM = Platform(name="sway-headless", backends=("sway", "atspi", "input"))
+PLATFORM = Platform(name="sway-headless", backends=("windows", "atspi", "input"))
 
 if __name__ == "__main__":
     sys.exit(run(PLATFORM))
