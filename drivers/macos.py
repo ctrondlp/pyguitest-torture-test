@@ -271,6 +271,61 @@ def _wait_new_app_window(gui, before_handles, timeout):
     return None
 
 
+# Dismiss-button preference order: Cancel before Close before OK, so a file
+# dialog is dismissed rather than accepted (Return/OK on a save panel would
+# write a file; Cancel never has a side effect).
+DISMISS_BUTTONS = ("Cancel", "Close", "OK")
+
+
+def _dismiss_dialog(gui, app_pid, dialog):
+    """Close `dialog`: Escape first, then its own dismiss button via AX.
+
+    Escape alone is not enough on every macOS, and the reason is Cocoa, not
+    focus. The fixture's QErrorMessage (shown via `showMessage()`, i.e.
+    `show()` + modal) comes up on Sequoia 15.8 as an *AXSheet* attached to
+    the main window rather than a standalone window: empty CG title, absent
+    from the app's AX window list. It nonetheless holds keyboard focus --
+    measured live, an injected Space activates its OK button and an injected
+    Return hits the default button, both closing it -- so pyguitest's
+    `wait_window_focus` reporting it focused is correct. Only injected
+    Escape fails to fire its reject, while an in-process Escape fires it
+    fine. The differentiator is the sheet: a standalone dialog *window*
+    (AXDialog -- the fixture's Progress dialog) closes on injected Escape,
+    whereas a sheet swallows it, because Cocoa maps Escape to the sheet's
+    cancel operation and QErrorMessage carries no cancel button. macOS 26 on
+    the old box showed these same leaves passing over Escape alone, which is
+    why this never failed before the Sequoia box joined the fleet.
+
+    So this is a cancel-less-sheet quirk, not a focus bug. The route that
+    always works is the dialog's own button over the AX action API, which
+    needs no key routing at all. Scoping it is free: a modally-BLOCKED push
+    button publishes no actions whatsoever (confirmed live -- the main
+    window's buttons raise ElementNotActionable while a dialog is up), so
+    "publishes click" selects the active dialog's buttons and can never
+    press the main window's.
+    """
+    gui.tap_key("Escape")
+    if gui.wait_window_close(dialog, timeout=2.0):
+        return True
+    for wanted in DISMISS_BUTTONS:
+        for el in gui.find_elements(role="push button"):
+            if getattr(el, "pid", None) != app_pid or el.name != wanted:
+                continue
+            if "click" not in (el.actions or ()):
+                continue
+            try:
+                el.click()
+            except Exception:
+                continue
+            if gui.wait_window_close(dialog, timeout=2.0):
+                return True
+    # One more Escape: a single press can genuinely miss while a dialog is
+    # still settling, and for a dialog with unnamed/localized buttons it is
+    # still the only route left.
+    gui.tap_key("Escape")
+    return gui.wait_window_close(dialog, timeout=2.0)
+
+
 def expected_controls():
     text = Path(APP_DIR, "tests", "test_app.py").read_text(encoding="utf-8")
     block = text.split("EXPECTED_CONTROLS = (", 1)[1].split("\n)", 1)[0]
@@ -637,21 +692,16 @@ def drive(gui, items, failures, app_pid, expected, app_window=None, window=None)
                 # dialog stays open and blocks everything driven after it.
                 gui.focus_window(dialog)
                 gui.wait_window_focus(dialog, timeout=2.0)
-            tap("Escape")
-            if not gui.wait_window_close(dialog, timeout=2.0):
-                # One more Escape: a single press can genuinely miss while a
-                # dialog is still settling.
-                tap("Escape")
-                if not gui.wait_window_close(dialog, timeout=2.0):
-                    # Named here, against the control that opened it. These
-                    # dialogs are application-modal, so one that stays open
-                    # makes every later control fail for a reason that has
-                    # nothing to do with those controls.
-                    failures.append(
-                        f"{name} ({role}) -> its dialog never closed; "
-                        "every control after this one ran against a modal window"
-                    )
-                    return False
+            if not _dismiss_dialog(gui, app_pid, dialog):
+                # Named here, against the control that opened it. These
+                # dialogs are application-modal, so one that stays open
+                # makes every later control fail for a reason that has
+                # nothing to do with those controls.
+                failures.append(
+                    f"{name} ({role}) -> its dialog never closed; "
+                    "every control after this one ran against a modal window"
+                )
+                return False
             if name not in ("Open", "Save As") and not gui.wait_until(
                 lambda: status_shows(name), timeout=0.8, interval=0.1
             ):
@@ -853,22 +903,17 @@ def drive_menus(gui, app_pid, failures, window=None):
                 # dialog stays open and blocks everything driven after it.
                 gui.focus_window(dialog)
                 gui.wait_window_focus(dialog, timeout=2.0)
-            gui.tap_key("Escape")
-            if not gui.wait_window_close(dialog, timeout=2.0):
-                # One more Escape: a single press can genuinely miss while a
-                # dialog is still settling.
-                gui.tap_key("Escape")
-                if not gui.wait_window_close(dialog, timeout=2.0):
-                    # Named here, against the control that opened it. These
-                    # dialogs are application-modal, so one that stays open
-                    # makes every later control fail for a reason that has
-                    # nothing to do with those controls.
-                    failures.append(
-                        f"{'/'.join([*path, name])} (menu item) -> its "
-                        "dialog never closed; every later interaction ran "
-                        "against a modal window"
-                    )
-                    return
+            if not _dismiss_dialog(gui, app_pid, dialog):
+                # Named here, against the control that opened it. These
+                # dialogs are application-modal, so one that stays open
+                # makes every later control fail for a reason that has
+                # nothing to do with those controls.
+                failures.append(
+                    f"{'/'.join([*path, name])} (menu item) -> its "
+                    "dialog never closed; every later interaction ran "
+                    "against a modal window"
+                )
+                return
 
     for path, name, item in leaves:
         try:
