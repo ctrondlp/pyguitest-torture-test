@@ -304,6 +304,39 @@ class WindowTest(unittest.TestCase):
         plain = named(QComboBox(), "Country")
         self.assertEqual(plain.accessibleDescription(), "Country")
 
+    def test_naming_a_tab_bar_puts_the_stable_id_in_the_description(self) -> None:
+        """A tab bar carries its stable id in the description, like a combo.
+
+        Qt's accessibility bridge publishes a tab bar's *selected tab* text as
+        the accessible name and discards ``setAccessibleName``, so -- as for a
+        combo box -- the stable identifier has to live in the description. A
+        ``QTabWidget``'s page-tab-list node is its child ``QTabBar``, so the
+        description lands there, and without a name: a named child would
+        publish a second ``page tab list`` and duplicate the container.
+
+        Qt's AT-SPI bridge does not in fact surface a tab bar's description
+        either (see ``named``), so this guards the construction-time intent --
+        the right slot, on the right node, and an explicit description refused
+        -- and the macOS AX / Windows UIA backends that may read it, not an
+        AT-SPI capability this cannot deliver.
+        """
+        from torture_test.base import named
+
+        bar = named(QTabBar(), "Standalone Tab Bar")
+        self.assertEqual(bar.accessibleName(), "Standalone Tab Bar")
+        self.assertEqual(bar.accessibleDescription(), "Standalone Tab Bar")
+
+        tabs = named(QTabWidget(), "Nested Tabs")
+        self.assertEqual(tabs.accessibleName(), "Nested Tabs")
+        self.assertEqual(tabs.tabBar().accessibleDescription(), "Nested Tabs")
+        # No name on the child, or the inventory would count it twice.
+        self.assertEqual(tabs.tabBar().accessibleName(), "")
+
+        with self.assertRaises(ValueError):
+            named(QTabBar(), "Standalone Tab Bar", "a description")
+        with self.assertRaises(ValueError):
+            named(QTabWidget(), "Nested Tabs", "a description")
+
     def test_every_named_widget_has_a_known_role(self) -> None:
         """No named app control is missing from `ROLE_BY_CLASS`.
 

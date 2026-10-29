@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QScrollArea,
     QStyle,
+    QTabBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -40,30 +42,54 @@ def named(widget: _Widget, name: str, description: str | None = None) -> _Widget
     window. For text-bearing controls the visible text already serves, but
     setting it here makes the contract explicit and covers icon-only controls.
 
-    A combo box is the one exception Qt's accessibility bridge makes: it
-    publishes the box's *current text* as the accessible name and discards
-    ``setAccessibleName`` entirely (verified live through AT-SPI), so the
-    stable name travels in the accessible description instead, which Qt does
-    not overwrite.
+    Two widget kinds publish their *content* as the accessible name and
+    discard ``setAccessibleName`` on the node the bridge exposes: a **combo
+    box** publishes its current text, and a **tab bar** its selected tab's
+    text. For both, the stable identifier is set in the accessible
+    *description* instead -- but the two are NOT equal through AT-SPI, verified
+    live on this fixture:
 
-    That makes `description` and a combo box mutually exclusive: the
-    description is the combo box's only stable identifier, so overwriting it
-    would leave the control reachable by neither name nor description --
-    `Session.dropdown()` tries exactly those two, in that order. Raising
-    here is deliberate. The alternative is a control that silently cannot be
+    - A combo box's description IS exposed. `Session.dropdown()` tries name
+      then description, so the combo resolves by its stable id in any UI
+      language even though the name localizes with the current value. This
+      works today.
+    - A tab bar's description is NOT exposed by Qt's AT-SPI bridge (neither is
+      a settable name): ``QAccessibleTabBar`` reports only the selected tab's
+      text and an empty description, so on Linux a tab bar stays reachable by
+      *role* ("page tab list"), not by stable name, in every language alike.
+      The description is still set below, because the macOS AX and Windows UIA
+      backends may surface it, but that is unverified and the AT-SPI gap is a
+      Qt limitation, not something this helper can close.
+
+    A `QTabWidget`'s tab row is a child `QTabBar`, and it is that child, not
+    the container, that the bridge exposes as the ``page tab list``. So the
+    description is set on ``widget.tabBar()`` -- there only, and without a name:
+    giving the child a name as well would publish a second ``page tab list``
+    carrying it and duplicate the container the in-process inventory already
+    counts. (That inventory reads ``accessibleName()`` directly, not the
+    bridge, so it is unaffected by any of this.)
+
+    Because the description is the only stable identifier these kinds have,
+    passing an explicit `description` for one is refused: overwriting it would
+    leave the control reachable by neither name nor description. Raising here
+    is deliberate -- the alternative is a control that silently cannot be
     found, which is the one failure this whole application exists to catch,
-    and it would surface as an unexplained miss in a driver run on some
-    other platform rather than as an error at construction.
+    and it would surface as an unexplained miss in a driver run on some other
+    platform rather than as an error at construction.
     """
     widget.setAccessibleName(name)
-    if isinstance(widget, QComboBox):
+    if isinstance(widget, (QComboBox, QTabBar, QTabWidget)):
         if description is not None:
+            kind = "combo box" if isinstance(widget, QComboBox) else "tab bar"
             raise ValueError(
-                f"{name!r}: a combo box cannot carry a description -- Qt "
+                f"{name!r}: a {kind} cannot carry a description -- Qt "
                 "publishes its current text as the accessible name, so the "
                 "description is the only stable identifier it has"
             )
-        widget.setAccessibleDescription(name)
+        # The QTabWidget's page-tab-list node is its child QTabBar; everything
+        # else (a combo box, a standalone tab bar) is its own such node.
+        target = widget.tabBar() if isinstance(widget, QTabWidget) else widget
+        target.setAccessibleDescription(name)
     elif description is not None:
         widget.setAccessibleDescription(description)
     return widget
