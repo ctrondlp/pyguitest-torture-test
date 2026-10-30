@@ -103,14 +103,22 @@ They share one contract:
    keyboard-driven control — 27 of them on Omarchy, each showing the
    *previous* control's status line, for a single cause. Warn once and keep
    going: action clicks still work without focus.
-8. Current status: four of the six dedicated platforms reach
-   `all controls verified` — GhostBSD, COSMIC, Debian and Windows. macOS is
-   one control short (`Undo History`) and Omarchy is blocked by a compositor
-   that grants no window keyboard focus; neither is a pyguitest defect. See
-   `VALIDATION.md` for the per-platform record. `drivers/linux.py` targets a
-   *live local desktop* rather than a dedicated box, is not part of that
-   matrix, and its last fix has not been re-run there; **ask before
-   launching anything on a local desktop.**
+8. **Current status lives in `VALIDATION.md`, not here.** Its
+   [Platform matrix](VALIDATION.md#platform-matrix) is the authority; this
+   list is a summary that has already gone stale once, so trust the matrix
+   where the two disagree. As of 2026-10-21 nine dedicated platforms reach
+   `all controls verified` — GhostBSD, COSMIC, Debian, Omarchy/Hyprland,
+   KaOS/niri, Ubuntu, Windows 11, Windows 10 and Fedora KDE — macOS is one
+   control short (`Undo History`, a driver gap), Fedora 19 cannot run the
+   fixture at all, and headless sway is not applicable. One superseded claim
+   is worth keeping as a trap rather than a fact: Omarchy was **not**
+   "blocked by a compositor that grants no window keyboard focus". It was
+   the shell's 300 s idle **session lock**, and the same tree passed first
+   time once unlocked — so check whether a box is locked before concluding
+   anything about its compositor, on macOS and Mint as much as here.
+   `drivers/linux.py` targets a *live local desktop* rather than a dedicated
+   box, is not part of that matrix, and its last fix has not been re-run
+   there; **ask before launching anything on a local desktop.**
 9. The recorder round-trip is **done**, on all three platforms where the
    recorder has a capture backend (`x11`, `win32`, `macos`): GhostBSD,
    Windows and macOS were recorded, the generated scripts checked against
@@ -119,16 +127,25 @@ They share one contract:
    thing to know before recording a driver again: **a recording made from a
    machine-speed driver carries timings too tight to replay**, because the
    generator inserts the waits it observed and a driver clicking flat out
-   leaves none to observe. The Wayland boxes cannot be recorded at all --
-   there is no Wayland capture backend, and their drivers click through
-   AT-SPI actions, which emit no input events.
+   leaves none to observe. The Wayland boxes are still not recordable
+   *driver-driven*, but the reason has changed and the old one is no longer
+   true: there **is** a Wayland capture backend now — evdev, read below the
+   compositor, run live on all five fleet compositors — so the missing
+   backend is not what stops them. What stops them is the half of that
+   sentence that was always the deeper problem: these drivers click through
+   AT-SPI **actions**, which emit no input events at all, so no recorder can
+   see them even in principle. A *human*-driven session on a Wayland box is
+   recordable; a driver-driven one is not, whatever the backend.
 
 ## Platform / backend matrix
 
 Each platform exercises its *native* backend — do not force Xvfb/X11
-everywhere. "Input strategy" matters as much as the backend: three of these
-boxes cannot deliver synthetic *pointer* input at all, and their drivers are
-built around that rather than fighting it.
+everywhere. "Input strategy" matters as much as the backend: **every Wayland
+box here** cannot deliver synthetic *pointer* input at all, and their drivers
+are built around that rather than fighting it. Not an exhaustive host list —
+`VALIDATION.md`'s [Platform matrix](VALIDATION.md#platform-matrix) is — these
+are the backend/input-strategy combinations worth knowing before writing a
+driver.
 
 | Host | Backend | Input strategy |
 |------|---------|----------------|
@@ -139,15 +156,28 @@ built around that rather than fighting it.
 | Windows 11 | `uia` + `win32` | pointer + keyboard, both work |
 | macOS | `macos` tree + `macquartz` input | pointer + keyboard, both work |
 | Omarchy / Hyprland (Arch) | `hyprland` windows, `atspi` tree, `wtype` keyboard, `grim` capture | **pointer-free**, but for a different and *fixable* reason — see below |
-| KaOS / niri | `niri` windows, `uinput` input | pointer + keyboard both available (`/dev/uinput` carries an ACL here), but **no `atspi` tree**: KaOS packages no accessibility stack, so the fixture cannot run there yet. No `drivers/niri.py` exists; `drivers/cosmic.py` is the likely fit, as it is for Hyprland, and has not been tried |
+| KaOS / niri | `niri` windows, `atspi` tree, `uinput` input | **pointer-free**, same strategy as COSMIC. Clean since 2026-10-15; the "KaOS packages no accessibility stack, so the fixture cannot run there" note that stood here was a provisioning gap, not a platform limit — `gtk3` (dogtail needs the Gtk-3.0 typelib at import), a PySide6 wheel, and `NIRI_SOCKET` exported from the socket file fixed it. Still no `drivers/niri.py`: `drivers/cosmic.py` serves it, as it does Hyprland |
+| Fedora KDE (Plasma 6, Wayland) | `kdotool` windows, `atspi` tree, `uinput` input | **pointer-free**, same strategy as COSMIC. `Window.pid` is absent (kdotool has no pid lookup) so matching is by title, like COSMIC; input is uinput rather than the eiinput portal, whose consent dialog cannot be answered unattended |
 
 On COSMIC, Debian and the local GNOME/Wayland desktop, `uinput` pointer
 events are accepted by the kernel
 and then silently dropped before the compositor — keyboard injection through
-the same backend works fine. That split is why those three drivers never
+the same backend works fine. That split is why those drivers never
 move the pointer at all: they click through `Element.click()` (the
 accessible action) and reach keyboard-only controls by Tab-seeking until
 `Element.focused` is true on the one they want.
+
+**A fourth measurement, from the other repo.** pyguitest-recorder's
+`docs/developers/status.md` (2026-10-27) measured the same thing on **KWin
+Wayland**: `gui.click()` through uinput left the fixture's status unchanged
+while the AT-SPI action click updated it. Four compositors, two repositories,
+one result — so treat "uinput delivers a pointer on Wayland" as false until
+some session demonstrates otherwise, and note that pyguitest's own
+`docs/install.md` said the opposite for COSMIC until it was corrected. Two
+*distinct* faults produce this symptom and must not be conflated: this one,
+pointer-only with the keyboard working, and the `KEY_POWER`/udev `uaccess`
+misclassification pyguitest fixed in its uinput backend, which killed pointer
+**and** keyboard together.
 
 ## Omarchy / Hyprland, the newest target
 

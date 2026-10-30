@@ -130,6 +130,24 @@ RING_ESCAPE_EVERY = 25
 # behaviour rather than to a new failure.
 FALLBACK_SEEK_PRESSES = 60
 
+# Window focus is re-read during the run rather than trusted from startup.
+# `run()` establishing it once was a snapshot, and a run is minutes long:
+# an idle lock, a screensaver, a notification or another app's dialog takes
+# focus, and from that point every Tab and every keystroke lands in whatever
+# took it while the driver still believes it has focus. That is the measured
+# shape of the macOS run that walked into the Dock and the Mint and Omarchy
+# runs that looked like driver bugs and were session locks. Re-reading costs
+# a bus round trip, so the answer is cached this long -- short enough that a
+# steal is caught within one control, long enough that the ring's Tab presses
+# do not each pay for it.
+FOCUS_RECHECK_SECONDS = 2.0
+# Consecutive failed re-assertions before the run stops asking. Without a
+# bound, a session that will not grant focus at all (a locked screen) pays a
+# full focus_window retry per keyboard control -- the "27 failures for one
+# cause" the startup warning exists to avoid. With it, the driver says so
+# once and lets the remaining controls report honestly.
+FOCUS_GIVE_UP_AFTER = 3
+
 # "Menu Button" is an InstantPopup QToolButton -- opening its menu, not
 # emitting `clicked`, is the real click behavior. Click, dismiss with Escape,
 # and skip the status-bar assertion (no report is coming).
@@ -391,14 +409,21 @@ def _element_name(el, role):
 class DriverRun:
     """One full drive of the fixture: controls, tab pages, then menus."""
 
-    def __init__(self, gui, platform, app_pid, expected, app_frame, has_focus):
+    def __init__(self, gui, platform, app_pid, expected, app_frame, has_focus,
+                 window=None):
         """Bind the live session and the run's bookkeeping."""
         self.gui = gui
         self.platform = platform
         self.app_pid = app_pid
         self.expected = expected
         self.app_frame = app_frame
-        self.has_focus = has_focus
+        self.window = window
+        # The startup answer seeds the cache; `ensure_focus` re-reads it.
+        self._focus_ok = has_focus
+        self._focus_checked = time.monotonic() if has_focus else 0.0
+        self._focus_failures = 0
+        self._focus_hopeless = False
+        self._refocused = 0
         self.failures = []
         self._seen = set()
         self._driven_roles = set()
@@ -484,6 +509,72 @@ class DriverRun:
         """One key tap through pyguitest."""
         self.gui.tap_key(name)
 
+    def ensure_focus(self):
+        """Whether the fixture window holds keyboard focus *now*, re-taking it.
+
+        This used to be a flag read once in `run()` and trusted for the whole
+        run. It is a snapshot of a thing that does not hold still: a run is
+        minutes long, and an idle lock, a screensaver, a notification or
+        another application's dialog takes focus part-way through. From that
+        moment the driver keeps believing it has focus while every Tab and
+        every keystroke it sends lands in whatever took it -- which is
+        exactly how the macOS run walked into the Dock and clicked Notes, and
+        how the Mint and Omarchy runs looked like driver bugs and turned out
+        to be session locks. A stale True is the dangerous direction: it
+        produces confident, wrong failures spread across every keyboard
+        control instead of one honest report.
+
+        So the answer is re-read, and re-asserted through `focus_window` --
+        pyguitest's own activate-retry-and-confirm primitive, which also
+        waits out a window still animating -- rather than remembered. The
+        stale *False* is fixed too: focus arriving late (a compositor with
+        focus-stealing prevention, a greeter that has just gone away) used to
+        leave the run declining every keyboard control for its whole length.
+
+        Cached for `FOCUS_RECHECK_SECONDS`, because reading focus costs a bus
+        round trip and the ring walk asks often. Gives up after
+        `FOCUS_GIVE_UP_AFTER` consecutive failed re-assertions so a session
+        that will not grant focus at all is paid for once, not per control.
+        """
+        if self.window is None or self._focus_hopeless:
+            return False
+        now = time.monotonic()
+        if now - self._focus_checked < FOCUS_RECHECK_SECONDS:
+            return self._focus_ok
+        self._focus_checked = now
+        try:
+            if self.gui.active_window() == self.window:
+                self._focus_ok = True
+                self._focus_failures = 0
+                return True
+        except Exception:
+            # Cannot ask -- a backend without WINDOW_STATE. Fall through to
+            # the re-assertion, which reports False for the same reason
+            # rather than raising.
+            pass
+        # Focus is elsewhere. Ask for it back, and believe the answer.
+        regained = False
+        try:
+            regained = bool(self.gui.focus_window(self.window))
+        except Exception:
+            regained = False
+        self._focus_ok = regained
+        if regained:
+            self._refocused += 1
+            self._focus_failures = 0
+            print(f"    (window had lost focus; re-focused it, "
+                  f"{self._refocused} so far)", flush=True)
+        else:
+            self._focus_failures += 1
+            if self._focus_failures >= FOCUS_GIVE_UP_AFTER:
+                self._focus_hopeless = True
+                print("WARNING: the window will not take keyboard focus "
+                      f"(gave up after {self._focus_failures} attempts); "
+                      "controls that need typing or Tab will not report. "
+                      "On a VM this is usually the session's idle lock.",
+                      flush=True)
+        return self._focus_ok
+
     def escape_focus(self):
         """Ctrl+Tab: moves focus on where Tab itself is being consumed."""
         try:
@@ -508,10 +599,12 @@ class DriverRun:
                 return True
         except Exception:
             pass
-        if not self.has_focus:
-            # The window never took keyboard focus (run() said so once,
-            # loudly), so every Tab below would land somewhere else. Decline
-            # up front and let the control report honestly instead.
+        if not self.ensure_focus():
+            # The window does not hold keyboard focus, so every Tab below
+            # would land somewhere else. Decline up front and let the control
+            # report honestly instead. Asked live rather than read from a
+            # startup flag: focus can have been taken since, and can equally
+            # have arrived since.
             return False
         for i in range(max_presses):
             if i and i % RING_ESCAPE_EVERY == 0:
@@ -898,7 +991,7 @@ class DriverRun:
         back to the caller for the fallback path rather than being failed
         here -- `drive_one` owns the retry and the failure record.
         """
-        if not pending or not self.has_focus:
+        if not pending or not self.ensure_focus():
             return pending
         leftover = []
         presses = 0
@@ -960,6 +1053,13 @@ class DriverRun:
             if fruitless and fruitless % 20 == 0:
                 print(f"    ring walk: {fruitless} presses since the last "
                       "pending control took focus", flush=True)
+                # A long fruitless stretch is what losing focus mid-walk
+                # looks like from here, so this is the cheap place to ask.
+                # If focus has gone and will not come back, every remaining
+                # press lands in whatever took it -- stop walking and let the
+                # fallback path report honestly instead of typing into it.
+                if not self.ensure_focus():
+                    break
             time.sleep(0.05)
         return leftover + pending
 
@@ -1222,8 +1322,14 @@ def run(platform):
             raise Failure(
                 f"torture-test app exited immediately with {app.returncode}")
         if window is not None:
-            gui.activate_window(window)
-            has_focus = gui.wait_window_focus(window, timeout=5.0)
+            # focus_window is pyguitest's own primitive for this: it waits
+            # for the window's geometry to settle, asks more than once (a
+            # compositor with focus-stealing prevention drops a single
+            # request), and checks the result instead of assuming it. The
+            # longer wait after it covers a compositor that grants focus
+            # later still, which activate_window alone never waited for.
+            has_focus = gui.focus_window(window) or gui.wait_window_focus(
+                window, timeout=5.0)
             if not has_focus:
                 # A real answer, not an exception: the compositor declined
                 # to focus the window, so every key sent from here lands
@@ -1237,7 +1343,8 @@ def run(platform):
                       "controls that need typing or Tab will not report")
         app_frame = _wait_app_frame(gui, app.pid, 5.0)
         expected = set(expected_controls())
-        drv = DriverRun(gui, platform, app.pid, expected, app_frame, has_focus)
+        drv = DriverRun(gui, platform, app.pid, expected, app_frame, has_focus,
+                        window)
         items, clipped, _, _ = drv.enumerate_page()
         print(f"actable controls found (visible): {len(items)}")
         if clipped:
